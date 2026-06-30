@@ -1,207 +1,182 @@
 """
-CRSH Treasury Simulator
-------------------------
-Simulates a community-owned treasury that seeds every pari-mutuel
-prediction market with a symmetric base allocation plus a contrarian
-overlay that leans into the minority side as crowd imbalance grows.
+CRSH Treasury Simulator — three-layer model
+--------------------------------------------
+Layer 1 (base):        Treasury seeds $12.5 YES + $12.5 NO on every market.
+                       Outcomes are a fair coin flip → real up/down days.
+Layer 2 (+contrarian): On 70/30 crowd-imbalanced markets (if activated),
+                       treasury also bets 10% of that market's pool on the
+                       minority side. Win prob is 30% or 40% (50/50 draw).
+Layer 3 (+rake):       The full 2.5% rake from every pool flows to the treasury.
 
-Core mechanics per market:
-  1. Crowd betting is generated with a fan-bias skew toward a "favorite" side.
-  2. Treasury allocates: base symmetric seed on both sides + contrarian
-     overlay proportional to imbalance, scaled by `contrarian_aggressiveness`.
-  3. Pool resolves (favorite wins with probability `favorite_win_prob`,
-     independent of how much was bet on it -- this is what creates the
-     behavioral inefficiency the treasury harvests).
-  4. Rake is taken off the top of the total pool before payout.
-  5. Treasury P&L = its share of the winning pool (proportional to its
-     stake in the winning side) - its stake, plus its pro-rata share of
-     the rake (the rake share modeled as a fixed platform-to-treasury cut).
+All three layers share the same random draw sequence so they diverge only
+based on what each layer adds.
 """
 
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Dict, Any
 
 
 @dataclass
 class SimConfig:
     starting_capital: float = 100_000.0
-    markets_per_epoch: int = 50
-    num_epochs: int = 20
-    rake_pct: float = 0.025          # total platform rake, e.g. 2.5%
-    treasury_rake_share: float = 0.5  # fraction of rake that flows to treasury
-    seed_per_side: float = 12.5       # symmetric base seed per side
-    contrarian_aggressiveness: float = 1.0  # scalar on the contrarian overlay
-    fan_bias_mean: float = 0.75       # avg fraction of crowd money on favorite
-    fan_bias_std: float = 0.1         # variance of fan bias across markets
-    crowd_volume_mean: float = 1000.0 # average total crowd stake per market
-    crowd_volume_std: float = 300.0
-    max_exposure_pct: float = 0.05    # max % of treasury capital in one market (per side)
+    num_days: int = 30
+    markets_per_day: int = 50
+
+    # Base seeding
+    seed_per_side: float = 12.5
+    crowd_volume_mean: float = 100.0
+    crowd_volume_std: float = 25.0
+
+    # Crowd imbalance distribution
+    fan_bias_mean: float = 0.55   # crowd imbalance centered near breakeven → realistic up/down days
+    fan_bias_std: float = 0.20
+
+    # Contrarian bet settings
+    contrarian_threshold: float = 0.70   # crowd split that triggers eligibility
+    contrarian_activation_prob: float = 0.50  # % of eligible markets where bet fires
+    contrarian_pool_min: float = 50.0
+    contrarian_pool_max: float = 150.0
+    contrarian_win_prob_low: float = 0.30   # treasury wins this % half the time
+    contrarian_win_prob_high: float = 0.40  # and this % the other half
+
+    # Rake
+    rake_pct: float = 0.025   # 2.5% of total pool
+
     seed: int = 42
 
 
-@dataclass
-class MarketResult:
-    epoch: int
-    market_idx: int
-    crowd_yes: float
-    crowd_no: float
-    treasury_yes: float
-    treasury_no: float
-    favorite_is_yes: bool
-    outcome_yes: bool
-    total_pool: float
-    rake_amount: float
-    treasury_rake_income: float
-    treasury_pnl_from_pool: float
-    treasury_pnl_total: float
+def _simulate_market(cfg: SimConfig, rng: random.Random):
+    """
+    Returns (base_pnl, contrarian_pnl, rake_income) for one market.
+    base_pnl and contrarian_pnl are computed AFTER rake is removed from the
+    distributable pool (rake goes to platform in layers 1 & 2, to treasury
+    in layer 3 as rake_income).
+    """
+    # --- crowd ---
+    crowd_volume = max(rng.gauss(cfg.crowd_volume_mean, cfg.crowd_volume_std), 10.0)
+    fan_bias = min(max(rng.gauss(cfg.fan_bias_mean, cfg.fan_bias_std), 0.50), 0.98)
+    crowd_yes = crowd_volume * fan_bias
+    crowd_no  = crowd_volume * (1.0 - fan_bias)
 
+    # --- base treasury stakes ---
+    t_yes = cfg.seed_per_side
+    t_no  = cfg.seed_per_side
 
-@dataclass
-class EpochResult:
-    epoch: int
-    starting_nav: float
-    ending_nav: float
-    fee_income: float
-    contrarian_edge: float
-    total_pnl: float
-    markets: List[MarketResult] = field(default_factory=list)
+    # --- fair-coin outcome ---
+    outcome_yes = rng.random() < 0.5
 
+    pool_yes   = crowd_yes + t_yes
+    pool_no    = crowd_no  + t_no
+    total_pool = pool_yes  + pool_no
 
-def _clip_treasury_stake(stake: float, capital: float, max_exposure_pct: float) -> float:
-    cap = capital * max_exposure_pct
-    return min(stake, max(cap, 0.0))
+    rake          = total_pool * cfg.rake_pct
+    distributable = total_pool - rake
 
+    winning_pool     = pool_yes if outcome_yes else pool_no
+    t_winning_stake  = t_yes   if outcome_yes else t_no
+    t_payout = distributable * (t_winning_stake / winning_pool) if winning_pool > 0 else 0.0
+    base_pnl = t_payout - (t_yes + t_no)
 
-def simulate_market(epoch: int, idx: int, capital: float, cfg: SimConfig, rng: random.Random) -> MarketResult:
-    # 1. crowd behavior
-    total_volume = max(rng.gauss(cfg.crowd_volume_mean, cfg.crowd_volume_std), 50.0)
-    fan_bias = min(max(rng.gauss(cfg.fan_bias_mean, cfg.fan_bias_std), 0.5), 0.99)
-    favorite_is_yes = rng.random() < 0.5
+    # --- contrarian bet ---
+    contrarian_pnl  = 0.0
+    contrarian_rake = 0.0
 
-    favorite_volume = total_volume * fan_bias
-    underdog_volume = total_volume * (1 - fan_bias)
-    crowd_yes = favorite_volume if favorite_is_yes else underdog_volume
-    crowd_no = underdog_volume if favorite_is_yes else favorite_volume
+    is_contrarian = fan_bias >= cfg.contrarian_threshold
+    activated     = is_contrarian and (rng.random() < cfg.contrarian_activation_prob)
 
-    # 2. treasury allocation: symmetric seed + contrarian overlay
-    base_yes = cfg.seed_per_side
-    base_no = cfg.seed_per_side
+    if activated:
+        c_size     = rng.uniform(cfg.contrarian_pool_min, cfg.contrarian_pool_max)
+        c_crowd_yes = c_size * fan_bias          # majority (crowded) side
+        c_crowd_no  = c_size * (1.0 - fan_bias)  # minority side
+        c_bet       = c_size * 0.10              # 10% of pool on minority (NO)
 
-    crowd_total = crowd_yes + crowd_no
-    imbalance = (crowd_yes - crowd_no) / crowd_total if crowd_total > 0 else 0.0
-    # imbalance > 0 means YES is the crowded side -> overlay leans NO, and vice versa
-    overlay_pool = cfg.seed_per_side * 2 * cfg.contrarian_aggressiveness * abs(imbalance)
-    if imbalance > 0:
-        overlay_yes, overlay_no = 0.0, overlay_pool
-    else:
-        overlay_yes, overlay_no = overlay_pool, 0.0
+        c_pool_yes = c_crowd_yes
+        c_pool_no  = c_crowd_no + c_bet
+        c_total    = c_pool_yes + c_pool_no
+        c_rake     = c_total * cfg.rake_pct
+        c_dist     = c_total - c_rake
+        contrarian_rake = c_rake
 
-    treasury_yes = _clip_treasury_stake(base_yes + overlay_yes, capital, cfg.max_exposure_pct)
-    treasury_no = _clip_treasury_stake(base_no + overlay_no, capital, cfg.max_exposure_pct)
+        # Win probability for minority: randomly 30% or 40%
+        c_win_prob = (cfg.contrarian_win_prob_high
+                      if rng.random() < 0.5
+                      else cfg.contrarian_win_prob_low)
+        no_wins = rng.random() < c_win_prob
 
-    # 3. resolve outcome
-    # True win prob for the minority side is capped at the midpoint between 50%
-    # and the crowd-implied underdog probability. E.g. crowd 70% YES → minority
-    # (NO) true win prob = 0.5 + (0.70 - 0.5) / 2 = 60%, not the full 70%.
-    # This avoids over-crediting the contrarian edge.
-    minority_true_prob = 0.5 + (fan_bias - 0.5) / 2
-    favorite_wins = rng.random() < (1.0 - minority_true_prob)
-    outcome_yes = favorite_wins if favorite_is_yes else (not favorite_wins)
+        if no_wins:
+            c_payout       = c_dist * (c_bet / c_pool_no)
+            contrarian_pnl = c_payout - c_bet
+        else:
+            contrarian_pnl = -c_bet
 
-    pool_yes = crowd_yes + treasury_yes
-    pool_no = crowd_no + treasury_no
-    total_pool = pool_yes + pool_no
-
-    # 4. rake off the top
-    rake_amount = total_pool * cfg.rake_pct
-    distributable = total_pool - rake_amount
-    treasury_rake_income = rake_amount * cfg.treasury_rake_share
-
-    # 5. payout: winning side splits `distributable` proportional to stake
-    winning_pool = pool_yes if outcome_yes else pool_no
-    treasury_winning_stake = treasury_yes if outcome_yes else treasury_no
-    treasury_stake_total = treasury_yes + treasury_no
-
-    if winning_pool > 0:
-        treasury_payout = distributable * (treasury_winning_stake / winning_pool)
-    else:
-        treasury_payout = 0.0
-
-    treasury_pnl_from_pool = treasury_payout - treasury_stake_total
-    treasury_pnl_total = treasury_pnl_from_pool + treasury_rake_income
-
-    return MarketResult(
-        epoch=epoch,
-        market_idx=idx,
-        crowd_yes=crowd_yes,
-        crowd_no=crowd_no,
-        treasury_yes=treasury_yes,
-        treasury_no=treasury_no,
-        favorite_is_yes=favorite_is_yes,
-        outcome_yes=outcome_yes,
-        total_pool=total_pool,
-        rake_amount=rake_amount,
-        treasury_rake_income=treasury_rake_income,
-        treasury_pnl_from_pool=treasury_pnl_from_pool,
-        treasury_pnl_total=treasury_pnl_total,
-    )
+    return base_pnl, contrarian_pnl, rake + contrarian_rake
 
 
 def run_simulation(cfg: SimConfig) -> Dict[str, Any]:
     rng = random.Random(cfg.seed)
-    capital = cfg.starting_capital
-    nav_curve = [capital]
-    epoch_results: List[EpochResult] = []
+
+    # Three independent capital accounts
+    cap_base = cfg.starting_capital
+    cap_con  = cfg.starting_capital
+    cap_rake = cfg.starting_capital
+
+    nav_base = [cap_base]
+    nav_con  = [cap_con]
+    nav_rake = [cap_rake]
+
+    day_results: List[Dict] = []
     all_market_pnls: List[float] = []
 
-    for epoch in range(cfg.num_epochs):
-        starting_nav = capital
-        fee_income = 0.0
-        contrarian_edge = 0.0
-        markets: List[MarketResult] = []
+    for day in range(cfg.num_days):
+        d_base = d_con = d_rake = 0.0
 
-        for i in range(cfg.markets_per_epoch):
-            m = simulate_market(epoch, i, capital, cfg, rng)
-            markets.append(m)
-            fee_income += m.treasury_rake_income
-            contrarian_edge += m.treasury_pnl_from_pool
-            capital += m.treasury_pnl_total
-            all_market_pnls.append(m.treasury_pnl_total)
+        for _ in range(cfg.markets_per_day):
+            bp, cp, rk = _simulate_market(cfg, rng)
+            d_base += bp
+            d_con  += cp
+            d_rake += rk
+            all_market_pnls.append(bp + cp + rk)
 
-        epoch_results.append(EpochResult(
-            epoch=epoch,
-            starting_nav=starting_nav,
-            ending_nav=capital,
-            fee_income=fee_income,
-            contrarian_edge=contrarian_edge,
-            total_pnl=fee_income + contrarian_edge,
-            markets=markets,
-        ))
-        nav_curve.append(capital)
+        cap_base += d_base
+        cap_con  += d_base + d_con
+        cap_rake += d_base + d_con + d_rake
+
+        nav_base.append(cap_base)
+        nav_con.append(cap_con)
+        nav_rake.append(cap_rake)
+
+        day_results.append({
+            "day": day + 1,
+            "base_pnl": d_base,
+            "contrarian_pnl": d_con,
+            "rake_income": d_rake,
+            "total_pnl": d_base + d_con + d_rake,
+        })
+
+    def layer_summary(final: float) -> Dict:
+        ret = (final - cfg.starting_capital) / cfg.starting_capital * 100
+        return {
+            "final_nav": final,
+            "total_return_pct": ret,
+            "total_pnl": final - cfg.starting_capital,
+            "profitable": final > cfg.starting_capital,
+        }
 
     return {
         "config": cfg.__dict__,
-        "nav_curve": nav_curve,
-        "epochs": [
-            {
-                "epoch": e.epoch,
-                "starting_nav": e.starting_nav,
-                "ending_nav": e.ending_nav,
-                "fee_income": e.fee_income,
-                "contrarian_edge": e.contrarian_edge,
-                "total_pnl": e.total_pnl,
-            }
-            for e in epoch_results
-        ],
+        "nav_curves": {
+            "base":             nav_base,
+            "plus_contrarian":  nav_con,
+            "plus_rake":        nav_rake,
+        },
+        "days": day_results,
         "market_pnls": all_market_pnls,
         "summary": {
-            "final_nav": capital,
-            "total_return_pct": (capital - cfg.starting_capital) / cfg.starting_capital * 100,
-            "total_fee_income": sum(e.fee_income for e in epoch_results),
-            "total_contrarian_edge": sum(e.contrarian_edge for e in epoch_results),
-            "num_markets_simulated": len(all_market_pnls),
-            "avg_market_pnl": sum(all_market_pnls) / len(all_market_pnls) if all_market_pnls else 0,
+            "base":             layer_summary(cap_base),
+            "plus_contrarian":  layer_summary(cap_con),
+            "plus_rake":        layer_summary(cap_rake),
+            "num_markets":      cfg.num_days * cfg.markets_per_day,
             "pct_markets_profitable": (
                 sum(1 for p in all_market_pnls if p > 0) / len(all_market_pnls) * 100
                 if all_market_pnls else 0
