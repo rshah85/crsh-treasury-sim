@@ -476,6 +476,201 @@ header h1 {
   line-height: 1.55;
 }
 
+/* ── Param groups in sidebar ── */
+.param-group {
+  margin-bottom: 20px;
+}
+
+/* ── Toggle (bool field) ── */
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  margin-top: 2px;
+}
+
+.toggle input { display: none; }
+
+.toggle-track {
+  width: 32px;
+  height: 18px;
+  background: var(--border2);
+  border-radius: 9px;
+  position: relative;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+
+.toggle input:checked + .toggle-track { background: var(--em); }
+
+.toggle-thumb {
+  position: absolute;
+  top: 3px; left: 3px;
+  width: 12px; height: 12px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.15s;
+}
+
+.toggle input:checked ~ .toggle-track .toggle-thumb,
+.toggle input:checked + .toggle-track .toggle-thumb { transform: translateX(14px); }
+
+.toggle-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--soft);
+}
+
+/* ── Sidebar action buttons ── */
+.sidebar-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.sidebar-actions .run-btn { margin-top: 0; }
+
+.sens-btn {
+  width: 100%;
+  padding: 9px;
+  background: transparent;
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  color: var(--soft);
+  font-family: 'Space Grotesk', sans-serif;
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.sens-btn:hover:not(:disabled) { border-color: var(--indigo); color: var(--indigo); }
+.sens-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* ── Model Assumptions section ── */
+.assumptions-section {
+  margin-bottom: 20px;
+}
+
+.assumptions-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.assumption-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.assumption-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.assumption-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.assumption-risk-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.assumption-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 3px;
+  letter-spacing: -0.02em;
+}
+
+.assumption-sub {
+  font-size: 10.5px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.assumption-legend {
+  display: flex;
+  gap: 16px;
+  font-size: 10px;
+  color: var(--muted);
+  padding-left: 2px;
+}
+
+/* ── Sensitivity table section ── */
+.sensitivity-section {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 20px;
+  margin-bottom: 16px;
+}
+
+.sensitivity-wrap {
+  overflow-x: auto;
+  margin-top: 10px;
+}
+
+.sensitivity-table {
+  border-collapse: collapse;
+  min-width: 480px;
+  width: 100%;
+  font-size: 12px;
+}
+
+.sensitivity-table th {
+  padding: 7px 10px;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.sens-corner {
+  text-align: left !important;
+  color: var(--muted);
+}
+
+.sens-row-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--soft);
+  padding: 6px 10px;
+  white-space: nowrap;
+  border-right: 1px solid var(--border);
+}
+
+.sens-cell {
+  text-align: center;
+  padding: 7px 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid rgba(0,0,0,0.1);
+}
+
 /* Recharts overrides */
 .recharts-cartesian-axis-tick-value { fill: var(--muted); font-size: 11px; }
 .recharts-tooltip-wrapper { font-size: 12px; }
