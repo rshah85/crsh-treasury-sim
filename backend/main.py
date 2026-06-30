@@ -29,6 +29,7 @@ class SimRequest(BaseModel):
     contrarian_pool_max: float = 150.0
     contrarian_win_prob_low: float = 0.30
     contrarian_win_prob_high: float = 0.40
+    max_contrarian_exposure_pct: float = 0.30
     rake_pct: float = 0.025
     seed: int = 42
 

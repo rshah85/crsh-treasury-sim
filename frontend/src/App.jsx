@@ -23,33 +23,35 @@ const DEFAULT_CONFIG = {
   contrarian_pool_max: 150,
   contrarian_win_prob_low: 0.30,
   contrarian_win_prob_high: 0.40,
+  max_contrarian_exposure_pct: 0.30,
   rake_pct: 0.025,
   seed: 42,
 };
 
 const FIELDS = [
-  { key: "starting_capital",        label: "Starting Capital ($)",          step: 1000 },
-  { key: "num_days",                label: "Days to Simulate",               step: 1 },
-  { key: "markets_per_day",         label: "Markets per Day",                step: 1 },
-  { key: "seed_per_side",           label: "Seed per Side ($)",              step: 0.5 },
-  { key: "crowd_volume_mean",       label: "Avg Crowd Volume / Market ($)",  step: 10 },
-  { key: "crowd_volume_std",        label: "Crowd Volume Std Dev",           step: 5 },
-  { key: "fan_bias_mean",           label: "Fan Bias Mean",                  step: 0.01 },
-  { key: "fan_bias_std",            label: "Fan Bias Std Dev",               step: 0.01 },
-  { key: "contrarian_threshold",    label: "Contrarian Threshold (e.g. 0.70)", step: 0.01 },
-  { key: "contrarian_activation_prob", label: "Contrarian Activation Prob", step: 0.05 },
-  { key: "contrarian_pool_min",     label: "Contrarian Pool Min ($)",        step: 10 },
-  { key: "contrarian_pool_max",     label: "Contrarian Pool Max ($)",        step: 10 },
-  { key: "contrarian_win_prob_low", label: "Contrarian Win Prob (low)",      step: 0.01 },
-  { key: "contrarian_win_prob_high",label: "Contrarian Win Prob (high)",     step: 0.01 },
-  { key: "rake_pct",                label: "Rake % (e.g. 0.025 = 2.5%)",    step: 0.001 },
-  { key: "seed",                    label: "Random Seed",                    step: 1 },
+  { key: "starting_capital",            label: "Starting Capital ($)",              step: 1000 },
+  { key: "num_days",                    label: "Days to Simulate",                  step: 1 },
+  { key: "markets_per_day",             label: "Markets per Day",                   step: 1 },
+  { key: "seed_per_side",              label: "Seed per Side ($)",                 step: 0.5 },
+  { key: "crowd_volume_mean",           label: "Avg Crowd Volume / Market ($)",     step: 10 },
+  { key: "crowd_volume_std",            label: "Crowd Volume Std Dev",              step: 5 },
+  { key: "fan_bias_mean",              label: "Fan Bias Mean",                     step: 0.01 },
+  { key: "fan_bias_std",               label: "Fan Bias Std Dev",                  step: 0.01 },
+  { key: "contrarian_threshold",        label: "Contrarian Threshold (e.g. 0.70)", step: 0.01 },
+  { key: "contrarian_activation_prob",  label: "Contrarian Activation Prob",       step: 0.05 },
+  { key: "contrarian_pool_min",         label: "Contrarian Pool Min ($)",           step: 10 },
+  { key: "contrarian_pool_max",         label: "Contrarian Pool Max ($)",           step: 10 },
+  { key: "contrarian_win_prob_low",     label: "Contrarian Win Prob (low)",         step: 0.01 },
+  { key: "contrarian_win_prob_high",    label: "Contrarian Win Prob (high)",        step: 0.01 },
+  { key: "max_contrarian_exposure_pct", label: "Max Contrarian Exposure % of Pool", step: 0.01 },
+  { key: "rake_pct",                    label: "Rake % (e.g. 0.025 = 2.5%)",       step: 0.001 },
+  { key: "seed",                        label: "Random Seed",                       step: 1 },
 ];
 
 const LAYERS = [
-  { key: "base",            label: "Base Seeding Only",         color: "#00ff88", desc: "$12.5 each side, fair-coin outcomes" },
-  { key: "plus_contrarian", label: "+ Contrarian Bets",         color: "#60a5fa", desc: "+10% of pool on minority when activated" },
-  { key: "plus_rake",       label: "+ Full 2.5% Rake",          color: "#f59e0b", desc: "All rake income flows to treasury" },
+  { key: "base",            label: "Base Seeding Only",    color: "#00ff88", desc: "$12.5 each side, fair-coin outcomes" },
+  { key: "plus_contrarian", label: "+ Contrarian Bets",    color: "#60a5fa", desc: "Convex allocation: max exposure on extreme splits" },
+  { key: "plus_rake",       label: "+ Full 2.5% Rake",     color: "#f59e0b", desc: "All rake income flows to treasury" },
 ];
 
 function fmt(n, d = 0) {
@@ -93,6 +95,40 @@ function LayerCard({ layer, data }) {
   );
 }
 
+function VarianceCard({ label, color, tag, tagClass, mean, std, total }) {
+  const cv = mean !== 0 ? Math.abs(std / mean) * 100 : 0;
+  const barWidth = Math.min(cv, 300) / 300 * 100; // cap at 300% CV for display
+  return (
+    <div className="variance-card">
+      <div className="variance-header">
+        <div className="variance-dot" style={{ background: color }} />
+        <span className="variance-label">{label}</span>
+        <span className={`variance-tag ${tagClass}`}>{tag}</span>
+      </div>
+      <div className="variance-stats">
+        <div className="variance-stat">
+          <div className="variance-stat-label">Avg / Day</div>
+          <div className="variance-stat-value" style={{ color }}>${fmt(mean, 1)}</div>
+        </div>
+        <div className="variance-stat">
+          <div className="variance-stat-label">Std Dev / Day</div>
+          <div className="variance-stat-value">±${fmt(std, 1)}</div>
+        </div>
+        <div className="variance-stat">
+          <div className="variance-stat-label">Total</div>
+          <div className="variance-stat-value">${fmt(total, 0)}</div>
+        </div>
+      </div>
+      <div className="variance-bar-track">
+        <div className="variance-bar-label">Volatility (CV = {fmt(cv, 0)}%)</div>
+        <div className="variance-bar-bg">
+          <div className="variance-bar-fill" style={{ width: `${barWidth}%`, background: color }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [config, setConfig] = useState(DEFAULT_CONFIG);
   const [result, setResult] = useState(null);
@@ -127,6 +163,7 @@ function App() {
         base: v,
         plus_contrarian: result.nav_curves.plus_contrarian[i],
         plus_rake: result.nav_curves.plus_rake[i],
+        rake_floor: result.nav_curves.rake_floor[i],
       }))
     : [];
 
@@ -198,10 +235,44 @@ function App() {
                 </div>
               </section>
 
-              {/* NAV chart — all three layers */}
+              {/* Rake floor vs contrarian variance */}
+              <section className="layers-section">
+                <div className="section-label">Stable Floor vs Volatile Overlay</div>
+                <div className="variance-grid">
+                  <VarianceCard
+                    label="Rake Income"
+                    color="#f59e0b"
+                    tag="STABLE FLOOR"
+                    tagClass="tag-stable"
+                    mean={result.daily_stats.rake.mean}
+                    std={result.daily_stats.rake.std}
+                    total={result.daily_stats.rake.total}
+                  />
+                  <VarianceCard
+                    label="Contrarian Bets"
+                    color="#60a5fa"
+                    tag="HIGH VARIANCE"
+                    tagClass="tag-volatile"
+                    mean={result.daily_stats.contrarian.mean}
+                    std={result.daily_stats.contrarian.std}
+                    total={result.daily_stats.contrarian.total}
+                  />
+                  <VarianceCard
+                    label="Base Seeding"
+                    color="#00ff88"
+                    tag="MODERATE VARIANCE"
+                    tagClass="tag-moderate"
+                    mean={result.daily_stats.base.mean}
+                    std={result.daily_stats.base.std}
+                    total={result.daily_stats.base.total}
+                  />
+                </div>
+              </section>
+
+              {/* NAV chart — all layers + rake floor */}
               <section className="chart-card">
                 <div className="chart-header">
-                  <h3>Treasury NAV — Three Layers</h3>
+                  <h3>Treasury NAV — Three Layers + Rake Floor</h3>
                   <span className="chart-badge badge-em">Daily</span>
                 </div>
                 <ResponsiveContainer width="100%" height={300}>
@@ -211,9 +282,10 @@ function App() {
                     <YAxis tick={{ fill: "#94a3b8", fontSize: 12 }} tickFormatter={(v) => `$${fmt(v / 1000)}k`} />
                     <Tooltip formatter={(v) => `$${fmt(v)}`} labelFormatter={(l) => `Day ${l}`} />
                     <Legend />
-                    <Line type="monotone" dataKey="base"            stroke="#00ff88" strokeWidth={2}   dot={false} name="Base Seeding" />
-                    <Line type="monotone" dataKey="plus_contrarian" stroke="#60a5fa" strokeWidth={2}   dot={false} name="+Contrarian" />
-                    <Line type="monotone" dataKey="plus_rake"       stroke="#f59e0b" strokeWidth={2.5} dot={false} name="+Rake" />
+                    <Line type="monotone" dataKey="rake_floor"       stroke="#f59e0b" strokeWidth={1.5} strokeDasharray="5 3" dot={false} name="Rake Floor" />
+                    <Line type="monotone" dataKey="base"             stroke="#00ff88" strokeWidth={2}   dot={false} name="Base Seeding" />
+                    <Line type="monotone" dataKey="plus_contrarian"  stroke="#60a5fa" strokeWidth={2}   dot={false} name="+Contrarian" />
+                    <Line type="monotone" dataKey="plus_rake"        stroke="#f59e0b" strokeWidth={2.5} dot={false} name="+Rake" />
                   </LineChart>
                 </ResponsiveContainer>
               </section>
@@ -232,9 +304,9 @@ function App() {
                     <Tooltip formatter={(v) => `$${fmt(v, 2)}`} />
                     <ReferenceLine y={0} stroke="rgba(255,255,255,0.2)" />
                     <Legend />
+                    <Bar dataKey="rake_income"    stackId="a" fill="#f59e0b" name="Rake" />
                     <Bar dataKey="base_pnl"       stackId="a" fill="#00ff88" name="Base" />
                     <Bar dataKey="contrarian_pnl" stackId="a" fill="#60a5fa" name="Contrarian" />
-                    <Bar dataKey="rake_income"    stackId="a" fill="#f59e0b" name="Rake" />
                   </BarChart>
                 </ResponsiveContainer>
               </section>

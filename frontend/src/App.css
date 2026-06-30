@@ -345,6 +345,94 @@ header h1 {
   letter-spacing: -0.02em;
 }
 
+/* ── Variance cards ── */
+.variance-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.variance-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
+.variance-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.variance-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.variance-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  flex: 1;
+}
+
+.variance-tag {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.tag-stable   { background: rgba(245,158,11,0.15);  color: #f59e0b; }
+.tag-volatile { background: rgba(96,165,250,0.15);  color: #60a5fa; }
+.tag-moderate { background: rgba(0,255,136,0.12);   color: #00ff88; }
+
+.variance-stats {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.variance-stat { flex: 1; }
+
+.variance-stat-label {
+  font-size: 10px;
+  color: var(--muted);
+  margin-bottom: 2px;
+  letter-spacing: 0.04em;
+}
+
+.variance-stat-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.variance-bar-label {
+  font-size: 10px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.variance-bar-bg {
+  height: 4px;
+  background: var(--border2);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.variance-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+
 /* ── Chart cards ── */
 .chart-card {
   background: var(--card);
