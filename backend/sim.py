@@ -34,7 +34,6 @@ class SimConfig:
     contrarian_aggressiveness: float = 1.0  # scalar on the contrarian overlay
     fan_bias_mean: float = 0.75       # avg fraction of crowd money on favorite
     fan_bias_std: float = 0.1         # variance of fan bias across markets
-    favorite_win_prob: float = 0.55   # true probability favorite wins
     crowd_volume_mean: float = 1000.0 # average total crowd stake per market
     crowd_volume_std: float = 300.0
     max_exposure_pct: float = 0.05    # max % of treasury capital in one market (per side)
@@ -101,8 +100,13 @@ def simulate_market(epoch: int, idx: int, capital: float, cfg: SimConfig, rng: r
     treasury_yes = _clip_treasury_stake(base_yes + overlay_yes, capital, cfg.max_exposure_pct)
     treasury_no = _clip_treasury_stake(base_no + overlay_no, capital, cfg.max_exposure_pct)
 
-    # 3. resolve outcome (independent of betting volume -- the inefficiency)
-    favorite_wins = rng.random() < cfg.favorite_win_prob
+    # 3. resolve outcome
+    # True win prob for the minority side is capped at the midpoint between 50%
+    # and the crowd-implied underdog probability. E.g. crowd 70% YES → minority
+    # (NO) true win prob = 0.5 + (0.70 - 0.5) / 2 = 60%, not the full 70%.
+    # This avoids over-crediting the contrarian edge.
+    minority_true_prob = 0.5 + (fan_bias - 0.5) / 2
+    favorite_wins = rng.random() < (1.0 - minority_true_prob)
     outcome_yes = favorite_wins if favorite_is_yes else (not favorite_wins)
 
     pool_yes = crowd_yes + treasury_yes

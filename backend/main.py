@@ -24,7 +24,6 @@ class SimRequest(BaseModel):
     contrarian_aggressiveness: float = 1.0
     fan_bias_mean: float = 0.75
     fan_bias_std: float = 0.1
-    favorite_win_prob: float = 0.55
     crowd_volume_mean: float = 1000.0
     crowd_volume_std: float = 300.0
     max_exposure_pct: float = 0.05
