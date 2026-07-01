@@ -2,11 +2,13 @@ import { useState, useCallback } from "react";
 import {
   LineChart, Line, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-  ResponsiveContainer, ReferenceLine,
+  ResponsiveContainer, ReferenceLine, Cell,
 } from "recharts";
 import "./App.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
+const PHASE_COLORS = { 1: "#10b981", 2: "#60a5fa", 3: "#a78bfa" };
 
 const DEFAULT_CONFIG = {
   starting_capital: 100000,
@@ -31,6 +33,17 @@ const DEFAULT_CONFIG = {
   rake_pct: 0.025,
   rake_volume_elasticity: 0.5,
   seed: 42,
+  // V2-specific
+  phase1_threshold: 0.65,
+  phase2_threshold: 0.70,
+  phase3_threshold: 0.75,
+  phase1_kelly_scalar: 1.00,
+  phase2_kelly_scalar: 0.70,
+  phase3_kelly_scalar: 0.50,
+  max_kelly_fraction: 0.25,
+  carryover_cap_pct: 0.50,
+  volume_cap: 5000000,
+  harvest_trigger_pct: 0.80,
 };
 
 const FIELD_GROUPS = [
@@ -79,6 +92,26 @@ const FIELD_GROUPS = [
     fields: [
       { key: "rake_pct",                label: "Rake % (e.g. 0.025)",     step: 0.001, type: "number" },
       { key: "rake_volume_elasticity",  label: "Volume Elasticity",        step: 0.05,  type: "number" },
+    ],
+  },
+  {
+    title: "V2 — Phase Schedule",
+    fields: [
+      { key: "phase1_threshold",    label: "Phase 1 Threshold (aggressive)", step: 0.01, type: "number" },
+      { key: "phase1_kelly_scalar", label: "Phase 1 Kelly Scalar",           step: 0.05, type: "number" },
+      { key: "phase2_threshold",    label: "Phase 2 Threshold",              step: 0.01, type: "number" },
+      { key: "phase2_kelly_scalar", label: "Phase 2 Kelly Scalar",           step: 0.05, type: "number" },
+      { key: "phase3_threshold",    label: "Phase 3 Threshold (selective)",  step: 0.01, type: "number" },
+      { key: "phase3_kelly_scalar", label: "Phase 3 Kelly Scalar",           step: 0.05, type: "number" },
+    ],
+  },
+  {
+    title: "V2 — Capital Controls",
+    fields: [
+      { key: "max_kelly_fraction",   label: "Max Kelly Fraction (cap)",        step: 0.01,    type: "number" },
+      { key: "carryover_cap_pct",    label: "Carryover Cap (% of daily limit)",step: 0.05,    type: "number" },
+      { key: "volume_cap",           label: "Platform Volume Cap ($)",          step: 100000,  type: "number" },
+      { key: "harvest_trigger_pct",  label: "Harvest Mode Trigger (%)",         step: 0.05,    type: "number" },
     ],
   },
 ];
@@ -294,8 +327,10 @@ export default function App() {
   const [config, setConfig] = useState(DEFAULT_CONFIG);
   const [result, setResult] = useState(null);
   const [sensitivity, setSensitivity] = useState(null);
+  const [bothResult, setBothResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [sensLoading, setSensLoading] = useState(false);
+  const [bothLoading, setBothLoading] = useState(false);
   const [error, setError] = useState(null);
 
   const handleChange = (key, value, type) => {
@@ -305,6 +340,19 @@ export default function App() {
       setConfig((c) => ({ ...c, [key]: value === "" ? "" : Number(value) }));
     }
   };
+
+  const runBoth = useCallback(async () => {
+    setBothLoading(true); setError(null);
+    try {
+      const resp = await fetch(`${API_URL}/api/simulate/both`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config),
+      });
+      if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
+      setBothResult(await resp.json());
+    } catch (e) { setError(e.message); }
+    finally { setBothLoading(false); }
+  }, [config]);
 
   const runSim = useCallback(async () => {
     setLoading(true); setError(null); setSensitivity(null);
@@ -353,6 +401,29 @@ export default function App() {
   })) ?? [];
 
   const histogram = result ? buildHistogram(result.market_pnls) : [];
+
+  // V1 vs V2 comparison data
+  const compNavData = bothResult
+    ? bothResult.v1.nav_curves.plus_rake.map((v1val, i) => ({
+        day: i,
+        v1_rake:       v1val,
+        v2_rake:       bothResult.v2.nav_curves.plus_rake[i],
+        v1_floor:      bothResult.v1.nav_curves.rake_floor[i],
+        v2_floor:      bothResult.v2.nav_curves.rake_floor[i],
+      }))
+    : [];
+
+  const utilizationData = bothResult
+    ? bothResult.v2.days.map((d) => ({
+        day:        d.day,
+        utilization: d.utilization_pct,
+        carryover:  d.carryover,
+        phase:      d.phase,
+        budget:     d.capital_budget,
+        deployed:   d.capital_deployed,
+        harvest:    d.harvest_mode,
+      }))
+    : [];
 
   return (
     <div className="app">
@@ -404,7 +475,10 @@ export default function App() {
 
           <div className="sidebar-actions">
             <button className="run-btn" onClick={runSim} disabled={loading}>
-              {loading ? "Running…" : "Run Simulation"}
+              {loading ? "Running…" : "Run Simulation (V1)"}
+            </button>
+            <button className="v2-btn" onClick={runBoth} disabled={bothLoading}>
+              {bothLoading ? "Computing…" : "Run V1 vs V2"}
             </button>
             {result && (
               <button className="sens-btn" onClick={runSensitivity} disabled={sensLoading}>
@@ -537,6 +611,117 @@ export default function App() {
 
               {/* Sensitivity table */}
               {sensitivity && <SensitivityTable data={sensitivity} />}
+            </>
+          )}
+
+          {/* ── V1 vs V2 comparison (shown independently of v1 single run) ── */}
+          {bothResult && (
+            <>
+              {/* Summary comparison cards */}
+              <section className="layers-section" style={{ marginTop: result ? 0 : 0 }}>
+                <div className="section-label">V1 vs V2 — Final NAV Comparison</div>
+                <div className="v2-compare-grid">
+                  {["base", "plus_contrarian", "plus_rake"].map((key) => {
+                    const v1 = bothResult.v1.summary[key];
+                    const v2 = bothResult.v2.summary[key];
+                    const delta = v2.total_return_pct - v1.total_return_pct;
+                    return (
+                      <div key={key} className="v2-compare-card">
+                        <div className="v2-compare-label">
+                          {key === "base" ? "Base Only" : key === "plus_contrarian" ? "+Contrarian" : "+Rake (Full)"}
+                        </div>
+                        <div className="v2-compare-row">
+                          <div className="v2-compare-col">
+                            <span className="v2-engine-tag v2-tag-v1">V1</span>
+                            <div className="v2-nav">${fmt(v1.final_nav)}</div>
+                            <div className={`v2-ret ${v1.profitable ? "pos" : "neg"}`}>
+                              {v1.total_return_pct >= 0 ? "+" : ""}{fmt(v1.total_return_pct, 2)}%
+                            </div>
+                          </div>
+                          <div className="v2-compare-arrow">→</div>
+                          <div className="v2-compare-col">
+                            <span className="v2-engine-tag v2-tag-v2">V2</span>
+                            <div className="v2-nav">${fmt(v2.final_nav)}</div>
+                            <div className={`v2-ret ${v2.profitable ? "pos" : "neg"}`}>
+                              {v2.total_return_pct >= 0 ? "+" : ""}{fmt(v2.total_return_pct, 2)}%
+                            </div>
+                          </div>
+                        </div>
+                        <div className={`v2-delta ${delta >= 0 ? "pos" : "neg"}`}>
+                          V2 {delta >= 0 ? "+" : ""}{fmt(delta, 2)}pp vs V1
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+
+              {/* NAV comparison chart */}
+              <section className="chart-card">
+                <div className="chart-header">
+                  <h3>V1 vs V2 — NAV Over Time (+Rake layer)</h3>
+                  <span className="chart-badge badge-v2">V1 vs V2</span>
+                </div>
+                <p className="hint">
+                  Solid = full strategy (+rake). Dashed = rake-floor only.
+                  V2 uses Kelly sizing + priority ordering + phase schedule.
+                </p>
+                <ResponsiveContainer width="100%" height={280}>
+                  <LineChart data={compNavData}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+                    <XAxis dataKey="day" tick={{ fill: "#94a3b8", fontSize: 12 }}
+                      label={{ value: "Day", position: "insideBottom", dy: 10, fill: "#94a3b8", fontSize: 12 }} />
+                    <YAxis tick={{ fill: "#94a3b8", fontSize: 12 }} tickFormatter={(v) => `$${fmt(v / 1000)}k`} />
+                    <Tooltip formatter={(v) => `$${fmt(v)}`} labelFormatter={(l) => `Day ${l}`} />
+                    <Legend />
+                    <Line type="monotone" dataKey="v1_floor" stroke="#94a3b8" strokeWidth={1} strokeDasharray="4 3" dot={false} name="V1 Rake Floor" />
+                    <Line type="monotone" dataKey="v2_floor" stroke="#a78bfa" strokeWidth={1} strokeDasharray="4 3" dot={false} name="V2 Rake Floor" />
+                    <Line type="monotone" dataKey="v1_rake"  stroke="#f59e0b" strokeWidth={2.5} dot={false} name="V1 +Rake" />
+                    <Line type="monotone" dataKey="v2_rake"  stroke="#a78bfa" strokeWidth={2.5} dot={false} name="V2 +Rake" />
+                  </LineChart>
+                </ResponsiveContainer>
+              </section>
+
+              {/* Capital utilization chart */}
+              <section className="chart-card">
+                <div className="chart-header">
+                  <h3>V2 — Daily Capital Utilization</h3>
+                  <span className="chart-badge badge-v2">V2 Only</span>
+                </div>
+                <p className="hint">
+                  Bar height = % of daily budget deployed (including carryover).
+                  Color = phase (
+                  <span style={{ color: PHASE_COLORS[1] }}>■ P1 aggressive</span>,{" "}
+                  <span style={{ color: PHASE_COLORS[2] }}>■ P2</span>,{" "}
+                  <span style={{ color: PHASE_COLORS[3] }}>■ P3 selective</span>).
+                  Harvest days are outlined in amber.
+                </p>
+                <ResponsiveContainer width="100%" height={220}>
+                  <BarChart data={utilizationData}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+                    <XAxis dataKey="day" tick={{ fill: "#94a3b8", fontSize: 12 }} />
+                    <YAxis tick={{ fill: "#94a3b8", fontSize: 12 }} tickFormatter={(v) => `${v}%`} domain={[0, 100]} />
+                    <Tooltip
+                      formatter={(v, name) => name === "utilization" ? `${v}%` : `$${fmt(v)}`}
+                      labelFormatter={(l) => {
+                        const d = utilizationData[l - 1];
+                        return d ? `Day ${l} · Phase ${d.phase}${d.harvest ? " · HARVEST" : ""}` : `Day ${l}`;
+                      }}
+                    />
+                    <ReferenceLine y={100} stroke="rgba(248,113,113,0.4)" strokeDasharray="3 2" />
+                    <Bar dataKey="utilization" name="utilization" radius={[2, 2, 0, 0]}>
+                      {utilizationData.map((d, i) => (
+                        <Cell
+                          key={i}
+                          fill={PHASE_COLORS[d.phase]}
+                          stroke={d.harvest ? "#f59e0b" : "transparent"}
+                          strokeWidth={d.harvest ? 2 : 0}
+                        />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </section>
             </>
           )}
         </main>

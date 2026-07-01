@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import List
 
 from sim import SimConfig, run_simulation
+from sim_v2 import SimConfigV2, run_simulation_v2
 
 app = FastAPI(title="CRSH Treasury Simulator")
 
@@ -53,6 +54,38 @@ def health():
 def simulate(req: SimRequest):
     cfg = SimConfig(**req.model_dump())
     return run_simulation(cfg)
+
+
+class SimRequestBoth(SimRequest):
+    # V2-specific overrides (all optional — v2 defaults used when absent)
+    phase1_threshold: float = 0.65
+    phase2_threshold: float = 0.70
+    phase3_threshold: float = 0.75
+    phase1_kelly_scalar: float = 1.00
+    phase2_kelly_scalar: float = 0.70
+    phase3_kelly_scalar: float = 0.50
+    max_kelly_fraction: float = 0.25
+    carryover_cap_pct: float = 0.50
+    volume_cap: float = 5_000_000.0
+    harvest_trigger_pct: float = 0.80
+
+
+@app.post("/api/simulate/both")
+def simulate_both(req: SimRequestBoth):
+    """Run v1 and v2 engines with the same shared params; return both results."""
+    base = req.model_dump()
+
+    # V1: pull only the fields SimConfig knows about
+    v1_keys = set(SimConfig.__dataclass_fields__.keys())
+    v1_params = {k: v for k, v in base.items() if k in v1_keys}
+    v1 = run_simulation(SimConfig(**v1_params))
+
+    # V2: uses all shared params + v2-specific ones
+    v2_keys = set(SimConfigV2.__dataclass_fields__.keys())
+    v2_params = {k: v for k, v in base.items() if k in v2_keys}
+    v2 = run_simulation_v2(SimConfigV2(**v2_params))
+
+    return {"v1": v1, "v2": v2}
 
 
 @app.post("/api/sensitivity")
