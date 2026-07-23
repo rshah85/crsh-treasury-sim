@@ -12,3 +12,16 @@ dist/
 
 # Vercel / Railway
 .vercel
+
+# Agent runtime state (never committed — restart-persisted safety state, kill switch flag)
+agent/state/*
+!agent/state/.gitkeep
+*.keystore.json
+keystore.json
+agent/keystore.json
+*.keystore
+CRSH_SIGNER_PASSPHRASE*
+
+# Agent logs (structured event log + per-bet performance log — generated at runtime)
+logs/*
+!logs/.gitkeep
