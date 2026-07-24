@@ -44,22 +44,38 @@ Design decisions worth calling out:
   what earlier looked like a rare anomaly (one market, id 116, stuck at
   status Open past its apparent close) — it wasn't stuck or anomalous at all;
   it's the NORMAL state for a market between `closeBetting()` and `resolve()`.
-- **Option C — no firing-window countdown, because there's nothing to count
-  down to.** Confirmed by CRSH (Lucas): `lockTime` is 0 for as long as a
-  market is genuinely open — this contract has no automatic time lock at all.
-  `closeBetting()` is a manual operator call, and it's the only thing that
-  ever sets `lockTime` to a nonzero value (the moment betting closed). The
-  original design assumed `lockTime` was a real future close time to count
-  down to (a T-8s..T-10s firing window, T-4s hard floor) — that assumption is
-  simply wrong for this contract: a market gives no advance signal of when
-  it's about to close, so there's no window to wait for or miss. `get_close_timestamp`'s
-  contract is therefore: 0 means still open, nonzero means already closed
-  (see agent/chain_adapter.py's interface docstring). `daemon.py`'s
-  `_market_loop` fires the moment imbalance crosses the phase threshold,
-  any time `lockTime == 0` — no earlier "waiting" state, no "missed window"
-  floor. The `fire_window_high_s`/`fire_window_low_s` config fields and the
-  T-4s queuing-latency analysis in docs/queuing_latency_model.md are now
-  stale artifacts of the old (wrong) model.
+- **`lockTime` is a genuine future close time — bettable iff `status == Open
+  and now < lockTime`.** This went through two wrong guesses before CRSH
+  (Lucas) confirmed the real model, worth recording so it doesn't get
+  re-guessed: first assumed lockTime was always a real countdown (true, but
+  the original T-8s..T-10s firing-window logic built on top of it was still
+  wrong — see Option C below); then, after observing one stuck market (id
+  116) and being told lockTime starts at 0 until a manual `closeBetting()`
+  call, assumed lockTime was ALWAYS 0-until-closed — also wrong, and confirmed
+  wrong by directly querying live markets showing `status=Open` with a real
+  multi-hour-future `lockTime`. The actual model: every market has a real
+  lockTime from creation — either a short automatic round-lock (60s, 120s, or
+  300s from creation, for the live-gaming-stream rounds) or an ~8h fallback
+  for markets that rely on a manual `closeBetting()` call instead. Market 116
+  wasn't stuck or anomalous; it was simply past its (real, already-elapsed)
+  lockTime without anyone having called `closeBetting()`/`resolve()` on it
+  yet — status stays `Open` throughout that gap, since the 3-value enum
+  (Open/Resolved/Cancelled) has no distinct "closed but unresolved" state.
+- **Option C — no firing-window countdown, but real close-time awareness.**
+  The original design's mistake wasn't using `lockTime` as a countdown at
+  all — it was gating FIRING on an artificial T-8s..T-10s window before that
+  countdown reaches zero (with a T-4s hard floor). There's no reason to wait:
+  `daemon.py`'s `_market_loop` fires the instant imbalance crosses the phase
+  threshold, any time `now < lockTime`, all the way from market discovery
+  down to the final tick before close. `lockTime` itself is still exactly
+  what decides open (`now < lockTime`) vs. closed (`now >= lockTime`) — see
+  discover_markets() below — and short-window markets (`lockTime - now <=
+  priority_window_s`, default 300s) get a faster poll cadence in
+  `_market_loop` so the agent doesn't miss a late-forming imbalance on a
+  60-120s round by only checking once a second. The old
+  `fire_window_high_s`/`fire_window_low_s` config fields and the T-4s
+  queuing-latency analysis in docs/queuing_latency_model.md are stale
+  artifacts of the old (wrong) model.
 - **Market discovery: a small sliding window at the tip, re-checked every
   cycle — not a full rescan, and not a one-shot cursor either.** Confirmed by
   CRSH (Lucas): market ids are sequential and the newest is always
@@ -74,19 +90,18 @@ Design decisions worth calling out:
   reconsidered. `discover_markets` now instead re-examines a small fixed
   window — the last `discovery_window` ids (default 5), i.e.
   `nextMarketId()-discovery_window .. nextMarketId()-1` — on EVERY call. Ids
-  confirmed Resolved/Cancelled/already-closed (nonzero lockTime — see the
-  Option C note above) while still inside the window are cached in
-  `_known_terminal` so they aren't re-fetched every cycle for as
-  long as they remain in-window; ids that age out of the window (superseded
-  by newer ones) are simply never looked at again either way. This bounds
-  cost to a small, constant number of calls per cycle regardless of total
-  market history, and — unlike the one-shot cursor — keeps re-checking each
-  in-window id every cycle until it's confirmed terminal, so a market isn't
-  written off from a single unlucky-timing snapshot. The accepted tradeoff,
-  per Lucas's guidance: a market that was already open and outside the window
-  at daemon startup (or that somehow falls behind the window without ever
-  being confirmed terminal) won't be picked up — bounded to whatever the
-  window doesn't cover, not an unbounded bug.
+  confirmed Resolved/Cancelled/already-past-lockTime while still inside the
+  window are cached in `_known_terminal` so they aren't re-fetched every
+  cycle for as long as they remain in-window; ids that age out of the window
+  (superseded by newer ones) are simply never looked at again either way.
+  This bounds cost to a small, constant number of calls per cycle regardless
+  of total market history, and — unlike the one-shot cursor — keeps
+  re-checking each in-window id every cycle until it's confirmed terminal, so
+  a market isn't written off from a single unlucky-timing snapshot. The
+  accepted tradeoff, per Lucas's guidance: a market that was already open and
+  outside the window at daemon startup (or that somehow falls behind the
+  window without ever being confirmed terminal) won't be picked up — bounded
+  to whatever the window doesn't cover, not an unbounded bug.
 - **`get_market_outcome` only reports Resolved markets.** A Cancelled market
   means funds are refundable via `claim()`, not a win/loss — there's no "someone
   won" outcome to report, and this adapter doesn't implement the claim flow
@@ -275,20 +290,22 @@ class Web3ChainAdapter:
         """Re-examines only the last `discovery_window` market ids relative to
         the CURRENT nextMarketId() tip, every single call — see the module
         docstring's "Market discovery" note. Ids confirmed terminal
-        (Resolved/Cancelled/already-closed) while still in-window are cached
-        in `_known_terminal` and skipped on later calls; ids that age out of
-        the window without ever being confirmed terminal are simply never
-        visited again either way, since the window only ever looks forward
-        from `nextMarketId() - discovery_window`.
+        (Resolved/Cancelled/already-past-lockTime) while still in-window are
+        cached in `_known_terminal` and skipped on later calls; ids that age
+        out of the window without ever being confirmed terminal are simply
+        never visited again either way, since the window only ever looks
+        forward from `nextMarketId() - discovery_window`.
 
-        lockTime == 0 means still open (see the module docstring's Option C
-        note — this contract has no automatic time lock; lockTime is 0 until
-        closeBetting() is called, at which point it's set to the close
-        moment). A market can be status == Open with a nonzero lockTime — the
-        3-value Status enum (Open/Resolved/Cancelled) has no distinct "closed
-        but not yet resolved" state, so lockTime, not status, is what actually
-        signals whether betting has closed."""
+        A market is bettable iff `status == Open AND now < lockTime` — see
+        the module docstring's note on lockTime being a genuine future close
+        time (either a short automatic round-lock or an ~8h manual-close
+        fallback), never a "0 until closed" sentinel. `status == Open` alone
+        isn't sufficient: the 3-value Status enum (Open/Resolved/Cancelled)
+        has no distinct "closed but not yet resolved" state, so a market
+        already past its lockTime can still read `status == Open` until
+        someone calls `resolve()` on it."""
         next_id = await self._rpc.call(self.contract.functions.nextMarketId().call)
+        now = time.time()
         window_start = max(0, next_id - self._discovery_window)
         active: list = []
         for market_id in range(window_start, next_id):
@@ -296,7 +313,7 @@ class Web3ChainAdapter:
                 continue
             market = await self._get_market(market_id)
             status, lock_time = market[0], market[3]
-            if status == STATUS_OPEN and lock_time == 0:
+            if status == STATUS_OPEN and lock_time > now:
                 active.append(str(market_id))
             else:
                 self._known_terminal.add(market_id)

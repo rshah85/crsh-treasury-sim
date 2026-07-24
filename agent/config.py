@@ -36,6 +36,13 @@ class AgentConfig:
 
     poll_interval_s: float = 1.0
 
+    # Short-window (round-based) markets — lockTime - now <= priority_window_s
+    # — get polled at priority_poll_interval_s instead of poll_interval_s, so a
+    # 60-120s round doesn't go unchecked for a full second while imbalance is
+    # forming. See daemon.py's module docstring's Option C note.
+    priority_window_s: float = 300.0
+    priority_poll_interval_s: float = 0.5
+
     # NEEDS CTO CONFIRMATION — placeholder values only.
     per_bet_cap_usdc: float = 500.0
     lifetime_cap_usdc: float = 20_000.0
@@ -93,6 +100,10 @@ class AgentConfig:
     def from_env(cls) -> "AgentConfig":
         cfg = cls()
         cfg.poll_interval_s = float(os.environ.get("CRSH_POLL_INTERVAL_S", cfg.poll_interval_s))
+        cfg.priority_window_s = float(os.environ.get("CRSH_PRIORITY_WINDOW_S", cfg.priority_window_s))
+        cfg.priority_poll_interval_s = float(
+            os.environ.get("CRSH_PRIORITY_POLL_INTERVAL_S", cfg.priority_poll_interval_s)
+        )
         cfg.per_bet_cap_usdc = float(os.environ.get("CRSH_PER_BET_CAP_USDC", cfg.per_bet_cap_usdc))
         cfg.lifetime_cap_usdc = float(os.environ.get("CRSH_LIFETIME_CAP_USDC", cfg.lifetime_cap_usdc))
         cfg.circuit_breaker_threshold = int(

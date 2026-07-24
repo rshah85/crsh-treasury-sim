@@ -17,16 +17,18 @@ Path.exists() — exists() silently swallows OSErrors and returns False for both
 fail OPEN. That's the one behavior this control cannot have.
 
 Option C (replacing the original T7 late-detection firing rule) — fire the moment
-imbalance crosses the phase threshold, no countdown window. The original design
-assumed a market's close time was knowable in advance (a T-8s..T-10s firing window,
-T-4s hard floor); confirmed by CRSH (Lucas) to be wrong for this contract — there is
-no automatic time lock, `lockTime` stays 0 for as long as a market is genuinely
-open, and only becomes nonzero at the moment an operator manually calls
-`closeBetting()` (see ChainAdapter.get_close_timestamp's docstring). There's no
-advance signal of when that will happen, so there's no window to wait for or miss:
-`_market_loop` checks only whether `lockTime == 0` (still open — proceed) or
-nonzero (already closed — stop), and fires on the very first tick imbalance clears
-the threshold.
+imbalance crosses the phase threshold, no countdown window. The original mistake
+wasn't using `lockTime` as a real close time (confirmed by CRSH/Lucas: every market
+has one — a short automatic round-lock at 60s/120s/300s from creation, or an ~8h
+fallback for manually-closed markets) — it was gating FIRING on an artificial
+T-8s..T-10s window before that countdown reaches zero, with a T-4s hard floor.
+There's no reason to wait: `_market_loop` still uses `lockTime` to decide open
+(`now < lockTime`, keep evaluating) vs. closed (`now >= lockTime`, stop), but fires
+on the very first tick imbalance clears the phase threshold, regardless of how much
+time remains. Short-window markets (`lockTime - now <= priority_window_s`, default
+300s — the round-based ones tied to live gaming streams) get a faster poll cadence
+(`priority_poll_interval_s`, default 0.5s) than the base `poll_interval_s`, so a
+60-120s round doesn't go unchecked for a full second while imbalance is forming.
 
 T3 — STALLED state: sustained poll failures (rate-limit errors and genuine RPC
 outages look identical from here, which is exactly why the shared rate-limited
@@ -260,30 +262,41 @@ class Daemon:
                 continue
 
             now = time.time()
+            seconds_remaining = lock_time - now
 
-            # lock_time == 0 means still open (no automatic time lock on this
-            # contract — see the module docstring's Option C note). A nonzero
-            # value means closeBetting() has already been called; there's no
-            # advance signal for when that will happen, so there's no
-            # countdown window to gate on — this is the only closed/open check.
-            if lock_time != 0:
+            # A market is bettable iff now < lockTime — every market has a
+            # real lockTime (a short automatic round-lock, or an ~8h fallback
+            # for manually-closed markets), never a "0 until closed" sentinel.
+            # See the module docstring's Option C note.
+            if seconds_remaining <= 0:
                 self._log("market_closed", market_id=market_id)
                 self.market_snapshots.pop(market_id, None)
                 return
 
+            # Short-window (round-based) markets get checked more often, so a
+            # late-forming imbalance on a 60-120s round isn't missed by only
+            # polling once a second.
+            sleep_s = (
+                self.config.priority_poll_interval_s
+                if seconds_remaining <= self.config.priority_window_s
+                else self.config.poll_interval_s
+            )
+
             self.market_snapshots[market_id] = {
                 "yes_pool": yes_pool,
                 "no_pool": no_pool,
+                "seconds_remaining": seconds_remaining,
                 "updated_at": now,
             }
 
             if self.risk_guard.is_market_bet(market_id):
-                await asyncio.sleep(self.config.poll_interval_s)
+                await asyncio.sleep(sleep_s)
                 continue
 
             if self.risk_guard.circuit_breaker_tripped():
-                self._log("skip", market_id=market_id, reason="circuit breaker tripped")
-                await asyncio.sleep(self.config.poll_interval_s)
+                self._log("skip", market_id=market_id, reason="circuit breaker tripped",
+                           seconds_remaining=round(seconds_remaining, 2))
+                await asyncio.sleep(sleep_s)
                 continue
 
             decision = decide(
@@ -293,8 +306,9 @@ class Daemon:
             if decision.action == "skip":
                 self._log(
                     "skip", market_id=market_id, reason=decision.reason, phase=decision.phase,
+                    seconds_remaining=round(seconds_remaining, 2),
                 )
-                await asyncio.sleep(self.config.poll_interval_s)
+                await asyncio.sleep(sleep_s)
                 continue
 
             # No firing-window gate — fire as soon as imbalance crosses the
@@ -303,13 +317,14 @@ class Daemon:
                 market_id, decision.side, decision.amount_usdc
             )
             if not reservation.approved:
-                self._log("skip", market_id=market_id, reason=reservation.reason)
-                await asyncio.sleep(self.config.poll_interval_s)
+                self._log("skip", market_id=market_id, reason=reservation.reason,
+                           seconds_remaining=round(seconds_remaining, 2))
+                await asyncio.sleep(sleep_s)
                 continue
 
             self._log(
                 "firing", market_id=market_id, side=decision.side, amount_usdc=round(decision.amount_usdc, 2),
-                phase=decision.phase,
+                phase=decision.phase, seconds_remaining=round(seconds_remaining, 2),
             )
             tx = await self.chain_adapter.place_bet(market_id, decision.side, decision.amount_usdc)
             await self.risk_guard.record_tx_submitted(market_id, tx.tx_hash)

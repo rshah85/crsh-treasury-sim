@@ -32,20 +32,26 @@ class Dashboard:
         phase = clock.phase()
 
         markets_table = Table(title="Active Markets", expand=True)
-        # No "T-close" column: this contract gives no advance signal of when a
-        # market will close (lockTime is 0 until closeBetting() is actually
-        # called) — see daemon.py's Option C note. "watching" just means still
-        # open (lock_time == 0), with no countdown to show.
-        for col in ("Market", "YES pool", "NO pool", "Majority", "Status"):
+        # T-close reflects lockTime, a genuine future close time (short
+        # automatic round-lock, or an ~8h manual-close fallback) — see
+        # daemon.py's Option C note. Markets inside priority_window_s are
+        # flagged, matching the faster poll cadence _market_loop gives them.
+        for col in ("Market", "YES pool", "NO pool", "Majority", "T-close (s)", "Status"):
             markets_table.add_column(col)
 
         for market_id, snap in sorted(daemon.market_snapshots.items()):
             total = snap["yes_pool"] + snap["no_pool"]
             majority_pct = (max(snap["yes_pool"], snap["no_pool"]) / total * 100) if total else 0.0
+            seconds_remaining = snap["seconds_remaining"] - (time.time() - snap["updated_at"])
+            seconds_remaining = max(seconds_remaining, 0.0)
+            is_priority = seconds_remaining <= daemon.config.priority_window_s
+            t_close = f"[bold yellow]{seconds_remaining:.0f}[/bold yellow]" if is_priority else f"{seconds_remaining:.0f}"
             if market_id in daemon.ledger.open_positions:
                 status = "[bold green]POSITION OPEN[/bold green]"
             elif daemon.risk_guard.is_market_bet(market_id):
                 status = "bet placed"
+            elif is_priority:
+                status = "[yellow]watching (priority)[/yellow]"
             else:
                 status = "watching"
             markets_table.add_row(
@@ -53,6 +59,7 @@ class Dashboard:
                 f"{snap['yes_pool']:.1f}",
                 f"{snap['no_pool']:.1f}",
                 f"{majority_pct:.1f}%",
+                t_close,
                 status,
             )
 
