@@ -57,9 +57,9 @@ class SimConfigV2:
     seed: int = 42
 
     # ── V2: 3-phase aggression schedule ───────────────────────────────────────
-    phase1_threshold: float = 0.65
-    phase2_threshold: float = 0.70
-    phase3_threshold: float = 0.75
+    phase1_threshold: float = 0.60
+    phase2_threshold: float = 0.60
+    phase3_threshold: float = 0.60
     phase1_kelly_scalar: float = 1.00   # full Kelly in early phase
     phase2_kelly_scalar: float = 0.70
     phase3_kelly_scalar: float = 0.50   # half-Kelly in late phase

@@ -25,7 +25,7 @@ from typing import Optional
 from .launch_clock import LaunchClock
 from ._sim_engine import SimConfigV2, _kelly_bet_size
 
-IMBALANCE_THRESHOLD = 0.70
+IMBALANCE_THRESHOLD = 0.60
 
 
 @dataclass(frozen=True)
