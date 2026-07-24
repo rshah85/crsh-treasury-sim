@@ -62,9 +62,15 @@ daemon process, PLUS:
   `web3_chain_adapter.py`. Do the same for a closed/resolved/cancelled market if
   available. Update the constants if the assumption was wrong — do not carry an
   unverified guess into mainnet.
-- **Gas limits calibrated.** `bet_gas_limit`/`approve_gas_limit` in
-  `agent/config.py` are placeholder values; confirm actual gas usage on testnet
-  and set real limits with headroom, not the defaults.
+- **Gas limits calibrated.** ~~Placeholder values; confirm actual gas usage~~
+  DONE for `bet_gas_limit`: the original 200,000 placeholder was too low —
+  every live bet reverted with "out of gas" (5 consecutive reverts, tripping
+  the circuit breaker; see decisions/timeline for the date). Replaying the
+  exact reverted calls via `estimate_gas` at the block before each landed
+  showed 292,865-310,101 gas actually needed; `bet_gas_limit` is now 400,000
+  (~30% headroom). `approve_gas_limit` (100,000) has been fine in practice.
+  Re-verify both if the contract's `bet()` logic ever changes (e.g. new
+  impact-reward calculations could shift gas usage).
 
 A "cycle" here is one pass through `Daemon._market_loop`'s per-tick body for one
 market — poll, decide, (skip or fire), log — as recorded by the structured JSON

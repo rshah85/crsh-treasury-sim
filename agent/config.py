@@ -71,10 +71,14 @@ class AgentConfig:
     # lifetime_cap_usdc" (the default, computed in daemon.py's adapter wiring).
     approve_target_usdc: Optional[float] = None
 
-    # Gas limits are fixed config, not estimated per-bet, to keep the firing-
-    # window hot path to a bounded number of RPC calls. Placeholder values —
-    # need real calibration on testnet before mainnet use.
-    bet_gas_limit: int = 200_000
+    # Gas limits are fixed config, not estimated per-bet, to keep the firing
+    # hot path to a bounded number of RPC calls. bet_gas_limit was originally
+    # a placeholder (200_000) that turned out to be too low — every live bet
+    # reverted with "out of gas"; replaying those exact calls with
+    # estimate_gas showed 292,865-310,101 gas actually needed. 400_000 gives
+    # ~30% headroom above the highest observed value. approve_gas_limit's
+    # 100_000 default has been fine in practice (plain ERC20 approve()).
+    bet_gas_limit: int = 400_000
     approve_gas_limit: int = 100_000
 
     # Market discovery re-checks only the last discovery_window market ids
