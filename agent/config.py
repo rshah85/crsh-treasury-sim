@@ -36,12 +36,6 @@ class AgentConfig:
 
     poll_interval_s: float = 1.0
 
-    # T-8s..T-10s target window; hard floor T-4s (see The Assignment for the tx-flow
-    # question this floor's feasibility depends on, and docs/queuing_latency_model.md
-    # for why T-4s survives correlated market closes).
-    fire_window_high_s: float = 10.0
-    fire_window_low_s: float = 4.0
-
     # NEEDS CTO CONFIRMATION — placeholder values only.
     per_bet_cap_usdc: float = 500.0
     lifetime_cap_usdc: float = 20_000.0
@@ -83,8 +77,7 @@ class AgentConfig:
     discovery_window: int = 5
 
     # How long place_bet waits for a receipt before returning TX_UNCONFIRMED
-    # rather than hanging. Must stay well inside fire_window_low_s (the T-4s
-    # floor) — see docs/queuing_latency_model.md.
+    # rather than hanging.
     tx_confirmation_timeout_s: float = 2.0
     tx_poll_interval_s: float = 0.25
 
@@ -100,8 +93,6 @@ class AgentConfig:
     def from_env(cls) -> "AgentConfig":
         cfg = cls()
         cfg.poll_interval_s = float(os.environ.get("CRSH_POLL_INTERVAL_S", cfg.poll_interval_s))
-        cfg.fire_window_high_s = float(os.environ.get("CRSH_FIRE_WINDOW_HIGH_S", cfg.fire_window_high_s))
-        cfg.fire_window_low_s = float(os.environ.get("CRSH_FIRE_WINDOW_LOW_S", cfg.fire_window_low_s))
         cfg.per_bet_cap_usdc = float(os.environ.get("CRSH_PER_BET_CAP_USDC", cfg.per_bet_cap_usdc))
         cfg.lifetime_cap_usdc = float(os.environ.get("CRSH_LIFETIME_CAP_USDC", cfg.lifetime_cap_usdc))
         cfg.circuit_breaker_threshold = int(

@@ -31,11 +31,12 @@ clock advanced one simulated day (24h) at a time, matching sim_v2's `day` loop �
 all markets generated for the same day share one `now`, exactly like sim_v2 calling
 `_get_phase`/computing `effective_edge` once per day before that day's market loop.
 
-Each market is also given a synthetic "seconds remaining until close" (rather than
-literally re-simulating a full 1-second-tick countdown per market, which buys
-nothing extra for validating decision/risk logic) so the T-4s..T-10s firing rule —
-including "detected too early" and "missed window" — gets exercised across a
-realistic spread, not just the happy path.
+No firing-window simulation: the live agent fires immediately once imbalance
+crosses the phase threshold (Option C — see agent/daemon.py's module docstring).
+There's no advance signal of when a market will close on this contract (lockTime
+is 0 until an operator manually calls closeBetting()), so there's no countdown
+window to replay here either — a backtest market either clears the imbalance/phase
+bars and fires, or it doesn't.
 """
 
 from __future__ import annotations
@@ -75,8 +76,6 @@ class BacktestResult:
     bets_reverted: int = 0
     skipped_no_imbalance: int = 0
     skipped_below_phase_threshold: int = 0
-    skipped_too_early: int = 0
-    missed_window: int = 0
     skipped_risk_guard: Dict[str, int] = field(default_factory=dict)
     final_nav: float = 0.0
     realized_pnl: float = 0.0
@@ -138,8 +137,6 @@ async def _run(config: AgentConfig, revert_prob: float, performance_log_path: st
             yes_pool = crowd_yes + cfg.seed_per_side
             no_pool = crowd_no + cfg.seed_per_side
 
-            seconds_remaining = rng.uniform(0.0, 20.0)
-
             decision = decide(market_id, yes_pool, no_pool, cfg, clock, now=now)
 
             if decision.action == "skip":
@@ -149,13 +146,8 @@ async def _run(config: AgentConfig, revert_prob: float, performance_log_path: st
                     result.skipped_below_phase_threshold += 1
                 continue
 
-            if seconds_remaining > config.fire_window_high_s:
-                result.skipped_too_early += 1
-                continue
-            if seconds_remaining < config.fire_window_low_s:
-                result.missed_window += 1
-                continue
-
+            # No firing-window check — fire immediately once imbalance clears
+            # the phase threshold, matching the live agent's Option C behavior.
             reservation = await risk_guard.check_and_reserve(market_id, decision.side, decision.amount_usdc)
             if not reservation.approved:
                 result.record_skip_reason(reservation.reason)
@@ -215,10 +207,8 @@ def _print_report(result: BacktestResult, config: AgentConfig, performance_log_p
     skips = Table(title="Skip / Non-Fire Breakdown", show_header=False)
     skips.add_column("reason", style="bold")
     skips.add_column("count")
-    skips.add_row("No imbalance past 70/30", str(result.skipped_no_imbalance))
+    skips.add_row("No imbalance past IMBALANCE_THRESHOLD", str(result.skipped_no_imbalance))
     skips.add_row("Below phase threshold", str(result.skipped_below_phase_threshold))
-    skips.add_row("Too early (before firing window)", str(result.skipped_too_early))
-    skips.add_row("Missed window (past T-4s floor)", str(result.missed_window))
     for reason, count in result.skipped_risk_guard.items():
         skips.add_row(f"RiskGuard: {reason}", str(count))
 

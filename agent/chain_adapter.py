@@ -55,7 +55,13 @@ class ChainAdapter(Protocol):
         ...
 
     async def get_close_timestamp(self, market_id: MarketId) -> int:
-        """Return the market's close time as a unix epoch timestamp (seconds)."""
+        """Return 0 while the market is still open — this platform has no
+        automatic time lock; betting closes only when the operator calls
+        closeBetting(), which is also the moment this becomes nonzero (the
+        timestamp betting closed at). This is NOT a future close time to
+        count down to — there's no advance signal for when a market will
+        close, so daemon.py's firing decision doesn't gate on one (see its
+        module docstring's Option C note)."""
         ...
 
     async def place_bet(self, market_id: MarketId, side: str, amount_usdc: float) -> TxResult:
@@ -105,7 +111,12 @@ class PlaceholderChainAdapter:
         self._markets[market_id] = {
             "yes_pool": base * bias,
             "no_pool": base * (1.0 - bias),
-            "close_ts": now + self._rng.uniform(30.0, self._market_lifetime_s),
+            # Hidden internal close time — used only to decide when THIS
+            # placeholder simulates closeBetting() having been called. Never
+            # exposed directly; get_close_timestamp() below returns 0 until
+            # this passes, matching the real contract's no-advance-signal
+            # behavior (see that method and the ChainAdapter interface note).
+            "_true_close_ts": now + self._rng.uniform(30.0, self._market_lifetime_s),
             "bias": bias,
             # True outcome is drawn independently of crowd bias at spawn time and
             # hidden until close — this is the whole premise a contrarian bet is
@@ -116,7 +127,7 @@ class PlaceholderChainAdapter:
     async def discover_markets(self) -> list[MarketId]:
         async def _discover() -> list[MarketId]:
             now = time.time()
-            expired = [mid for mid, m in self._markets.items() if m["close_ts"] <= now]
+            expired = [mid for mid, m in self._markets.items() if m["_true_close_ts"] <= now]
             for mid in expired:
                 self._resolved_outcomes[mid] = self._markets[mid]["true_outcome_yes"]
                 del self._markets[mid]
@@ -139,7 +150,11 @@ class PlaceholderChainAdapter:
 
     async def get_close_timestamp(self, market_id: MarketId) -> int:
         async def _get() -> int:
-            return int(self._markets[market_id]["close_ts"])
+            m = self._markets[market_id]
+            true_close = m["_true_close_ts"]
+            if time.time() >= true_close:
+                return int(true_close)  # simulates closeBetting() having fired
+            return 0  # still open — no advance signal, matching the real contract
 
         return await self._rpc.call(_get)
 

@@ -16,11 +16,17 @@ Path.exists() — exists() silently swallows OSErrors and returns False for both
 "file genuinely absent" and "couldn't read it", which would make a read error
 fail OPEN. That's the one behavior this control cannot have.
 
-T7 — late-detection firing rule: a market fires whenever imbalance is observed
-while `fire_window_low_s <= seconds_remaining <= fire_window_high_s`, evaluated
-fresh every tick — not just at first detection. So "detected early, window not
-open yet" and "detected late, still within the floor" both self-correct on the
-next tick without special-casing "first detection time" anywhere.
+Option C (replacing the original T7 late-detection firing rule) — fire the moment
+imbalance crosses the phase threshold, no countdown window. The original design
+assumed a market's close time was knowable in advance (a T-8s..T-10s firing window,
+T-4s hard floor); confirmed by CRSH (Lucas) to be wrong for this contract — there is
+no automatic time lock, `lockTime` stays 0 for as long as a market is genuinely
+open, and only becomes nonzero at the moment an operator manually calls
+`closeBetting()` (see ChainAdapter.get_close_timestamp's docstring). There's no
+advance signal of when that will happen, so there's no window to wait for or miss:
+`_market_loop` checks only whether `lockTime == 0` (still open — proceed) or
+nonzero (already closed — stop), and fires on the very first tick imbalance clears
+the threshold.
 
 T3 — STALLED state: sustained poll failures (rate-limit errors and genuine RPC
 outages look identical from here, which is exactly why the shared rate-limited
@@ -228,7 +234,6 @@ class Daemon:
             await asyncio.sleep(self.config.poll_interval_s)
 
     async def _market_loop(self, market_id: str) -> None:
-        missed_window_logged = False
         # Own tracker per market task — see the note on _discovery_stall_tracker.
         stall_tracker = StallTracker(self.config.stall_threshold)
 
@@ -240,7 +245,7 @@ class Daemon:
 
             try:
                 yes_pool, no_pool = await self.chain_adapter.get_pool_sizes(market_id)
-                close_ts = await self.chain_adapter.get_close_timestamp(market_id)
+                lock_time = await self.chain_adapter.get_close_timestamp(market_id)
                 transition = stall_tracker.record_success()
                 if transition:
                     self._log(transition, market_id=market_id)
@@ -255,27 +260,29 @@ class Daemon:
                 continue
 
             now = time.time()
-            seconds_remaining = close_ts - now
+
+            # lock_time == 0 means still open (no automatic time lock on this
+            # contract — see the module docstring's Option C note). A nonzero
+            # value means closeBetting() has already been called; there's no
+            # advance signal for when that will happen, so there's no
+            # countdown window to gate on — this is the only closed/open check.
+            if lock_time != 0:
+                self._log("market_closed", market_id=market_id)
+                self.market_snapshots.pop(market_id, None)
+                return
 
             self.market_snapshots[market_id] = {
                 "yes_pool": yes_pool,
                 "no_pool": no_pool,
-                "seconds_remaining": seconds_remaining,
                 "updated_at": now,
             }
-
-            if seconds_remaining <= 0:
-                self._log("market_closed", market_id=market_id)
-                self.market_snapshots.pop(market_id, None)
-                return
 
             if self.risk_guard.is_market_bet(market_id):
                 await asyncio.sleep(self.config.poll_interval_s)
                 continue
 
             if self.risk_guard.circuit_breaker_tripped():
-                self._log("skip", market_id=market_id, reason="circuit breaker tripped",
-                           seconds_remaining=round(seconds_remaining, 2))
+                self._log("skip", market_id=market_id, reason="circuit breaker tripped")
                 await asyncio.sleep(self.config.poll_interval_s)
                 continue
 
@@ -285,45 +292,24 @@ class Daemon:
 
             if decision.action == "skip":
                 self._log(
-                    "skip", market_id=market_id, reason=decision.reason,
-                    seconds_remaining=round(seconds_remaining, 2), phase=decision.phase,
+                    "skip", market_id=market_id, reason=decision.reason, phase=decision.phase,
                 )
                 await asyncio.sleep(self.config.poll_interval_s)
                 continue
 
-            if seconds_remaining > self.config.fire_window_high_s:
-                self._log(
-                    "waiting", market_id=market_id, reason="imbalance detected before firing window opens",
-                    seconds_remaining=round(seconds_remaining, 2),
-                )
-                await asyncio.sleep(self.config.poll_interval_s)
-                continue
-
-            if seconds_remaining < self.config.fire_window_low_s:
-                if not missed_window_logged:
-                    self._log(
-                        "missed_window", market_id=market_id,
-                        reason="imbalance detected past T-4s floor", seconds_remaining=round(seconds_remaining, 2),
-                    )
-                    missed_window_logged = True
-                await asyncio.sleep(self.config.poll_interval_s)
-                continue
-
-            # Inside [fire_window_low_s, fire_window_high_s] — fire.
+            # No firing-window gate — fire as soon as imbalance crosses the
+            # phase threshold. See the module docstring's Option C note.
             reservation = await self.risk_guard.check_and_reserve(
                 market_id, decision.side, decision.amount_usdc
             )
             if not reservation.approved:
-                self._log(
-                    "skip", market_id=market_id, reason=reservation.reason,
-                    seconds_remaining=round(seconds_remaining, 2),
-                )
+                self._log("skip", market_id=market_id, reason=reservation.reason)
                 await asyncio.sleep(self.config.poll_interval_s)
                 continue
 
             self._log(
                 "firing", market_id=market_id, side=decision.side, amount_usdc=round(decision.amount_usdc, 2),
-                seconds_remaining=round(seconds_remaining, 2), phase=decision.phase,
+                phase=decision.phase,
             )
             tx = await self.chain_adapter.place_bet(market_id, decision.side, decision.amount_usdc)
             await self.risk_guard.record_tx_submitted(market_id, tx.tx_hash)

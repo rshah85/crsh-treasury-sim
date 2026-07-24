@@ -13,15 +13,14 @@ keystore is configured (see daemon.py's adapter selection).
 Design decisions worth calling out:
 
 - **Approve+call, not permit, and approved ONCE at startup, not per-bet.** The
-  design doc listed "single tx vs. approve+call" as a blocking open question
-  because it determines whether the T-4s firing floor is feasible. The ABI
-  confirms `bet()` pulls funds via a standard ERC20 allowance (there's also a
-  `betWithPermit` path, but that requires EIP-2612 signature support from the
-  deployed USDC token, which isn't confirmed). Resolving this pragmatically:
-  `connect()` checks the current allowance once at startup and submits a single
-  `approve()` transaction if it's insufficient — entirely OUTSIDE the hot firing
-  path. Every live `bet()` call during the T-4s..T-10s window is then exactly
-  ONE transaction, same as the placeholder assumed.
+  design doc listed "single tx vs. approve+call" as a blocking open question.
+  The ABI confirms `bet()` pulls funds via a standard ERC20 allowance (there's
+  also a `betWithPermit` path, but that requires EIP-2612 signature support
+  from the deployed USDC token, which isn't confirmed). Resolving this
+  pragmatically: `connect()` checks the current allowance once at startup and
+  submits a single `approve()` transaction if it's insufficient — entirely
+  OUTSIDE the hot firing path. Every live `bet()` call is then exactly ONE
+  transaction, same as the placeholder assumed.
 - **Approval is bounded to `lifetime_cap_usdc`, not "infinite approve."** Infinite
   ERC20 approval is a common anti-pattern; capping it to the same number
   RiskGuard already treats as the hard ceiling on total capital at risk means the
@@ -29,8 +28,8 @@ Design decisions worth calling out:
   even in a hypothetical RiskGuard bug — defense in depth, not just redundant.
 - **Gas price and nonce are fetched fresh per bet, but gas LIMIT is a fixed
   config value, not estimated per-bet.** `estimate_gas` is itself an RPC round
-  trip; skipping it keeps the firing-window hot path to a bounded, known number
-  of calls (get_pool_sizes, get_close_timestamp, get_transaction_count, gas_price,
+  trip; skipping it keeps the firing hot path to a bounded, known number of
+  calls (get_pool_sizes, get_close_timestamp, get_transaction_count, gas_price,
   send_raw_transaction, then receipt polling) rather than adding a data-dependent
   one. The fixed limit is a placeholder needing real calibration on testnet — see
   docs/graduation_gate.md.
@@ -38,10 +37,29 @@ Design decisions worth calling out:
   `Open=0, Resolved=1, Cancelled=2` — there is no Closed state.** Matches what
   empirical sampling had already found (a 60-market random sample plus
   targeted lookups showed status=1 correlating with real, non-default
-  `winningOption` + real stakes, i.e. Resolved). The only status value ever
-  observed as anything but Resolved/Cancelled was Open — for markets whose
-  lockTime had already passed, see the discover_markets() note below for why
-  that's expected and handled, not a 4th state.
+  `winningOption` + real stakes, i.e. Resolved). There is no distinct "closed
+  but not yet resolved" status value — a market that's had `closeBetting()`
+  called on it stays `status == Open` and is instead signaled by a nonzero
+  `lockTime` (see the next note and the Option C note below). This resolved
+  what earlier looked like a rare anomaly (one market, id 116, stuck at
+  status Open past its apparent close) — it wasn't stuck or anomalous at all;
+  it's the NORMAL state for a market between `closeBetting()` and `resolve()`.
+- **Option C — no firing-window countdown, because there's nothing to count
+  down to.** Confirmed by CRSH (Lucas): `lockTime` is 0 for as long as a
+  market is genuinely open — this contract has no automatic time lock at all.
+  `closeBetting()` is a manual operator call, and it's the only thing that
+  ever sets `lockTime` to a nonzero value (the moment betting closed). The
+  original design assumed `lockTime` was a real future close time to count
+  down to (a T-8s..T-10s firing window, T-4s hard floor) — that assumption is
+  simply wrong for this contract: a market gives no advance signal of when
+  it's about to close, so there's no window to wait for or miss. `get_close_timestamp`'s
+  contract is therefore: 0 means still open, nonzero means already closed
+  (see agent/chain_adapter.py's interface docstring). `daemon.py`'s
+  `_market_loop` fires the moment imbalance crosses the phase threshold,
+  any time `lockTime == 0` — no earlier "waiting" state, no "missed window"
+  floor. The `fire_window_high_s`/`fire_window_low_s` config fields and the
+  T-4s queuing-latency analysis in docs/queuing_latency_model.md are now
+  stale artifacts of the old (wrong) model.
 - **Market discovery: a small sliding window at the tip, re-checked every
   cycle — not a full rescan, and not a one-shot cursor either.** Confirmed by
   CRSH (Lucas): market ids are sequential and the newest is always
@@ -56,8 +74,9 @@ Design decisions worth calling out:
   reconsidered. `discover_markets` now instead re-examines a small fixed
   window — the last `discovery_window` ids (default 5), i.e.
   `nextMarketId()-discovery_window .. nextMarketId()-1` — on EVERY call. Ids
-  confirmed Resolved/Cancelled/past-lockTime while still inside the window are
-  cached in `_known_terminal` so they aren't re-fetched every cycle for as
+  confirmed Resolved/Cancelled/already-closed (nonzero lockTime — see the
+  Option C note above) while still inside the window are cached in
+  `_known_terminal` so they aren't re-fetched every cycle for as
   long as they remain in-window; ids that age out of the window (superseded
   by newer ones) are simply never looked at again either way. This bounds
   cost to a small, constant number of calls per cycle regardless of total
@@ -256,13 +275,20 @@ class Web3ChainAdapter:
         """Re-examines only the last `discovery_window` market ids relative to
         the CURRENT nextMarketId() tip, every single call — see the module
         docstring's "Market discovery" note. Ids confirmed terminal
-        (Resolved/Cancelled/past-lockTime) while still in-window are cached in
-        `_known_terminal` and skipped on later calls; ids that age out of the
-        window without ever being confirmed terminal are simply never visited
-        again either way, since the window only ever looks forward from
-        `nextMarketId() - discovery_window`."""
+        (Resolved/Cancelled/already-closed) while still in-window are cached
+        in `_known_terminal` and skipped on later calls; ids that age out of
+        the window without ever being confirmed terminal are simply never
+        visited again either way, since the window only ever looks forward
+        from `nextMarketId() - discovery_window`.
+
+        lockTime == 0 means still open (see the module docstring's Option C
+        note — this contract has no automatic time lock; lockTime is 0 until
+        closeBetting() is called, at which point it's set to the close
+        moment). A market can be status == Open with a nonzero lockTime — the
+        3-value Status enum (Open/Resolved/Cancelled) has no distinct "closed
+        but not yet resolved" state, so lockTime, not status, is what actually
+        signals whether betting has closed."""
         next_id = await self._rpc.call(self.contract.functions.nextMarketId().call)
-        now = time.time()
         window_start = max(0, next_id - self._discovery_window)
         active: list = []
         for market_id in range(window_start, next_id):
@@ -270,7 +296,7 @@ class Web3ChainAdapter:
                 continue
             market = await self._get_market(market_id)
             status, lock_time = market[0], market[3]
-            if status == STATUS_OPEN and lock_time > now:
+            if status == STATUS_OPEN and lock_time == 0:
                 active.append(str(market_id))
             else:
                 self._known_terminal.add(market_id)
