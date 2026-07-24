@@ -165,6 +165,10 @@ class Web3ChainAdapter:
         self._tx_confirmation_timeout_s = tx_confirmation_timeout_s
         self._tx_poll_interval_s = tx_poll_interval_s
         self._discovery_window = discovery_window
+        # Serializes nonce-fetch-through-send across concurrent _market_loop
+        # tasks — see _send_signed's docstring for why fetching a fresh nonce
+        # per call isn't sufficient on its own.
+        self._nonce_lock = asyncio.Lock()
 
         self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
 
@@ -245,24 +249,41 @@ class Web3ChainAdapter:
         real load this places on the provider relative to what the shared rate
         limiter (T8) is meant to bound. See docs/queuing_latency_model.md's
         update note: this means one live `place_bet` now costs 3 real RPC calls
-        here, not the 1 the placeholder-based model assumed."""
+        here, not the 1 the placeholder-based model assumed.
+
+        Fetching a fresh nonce right before signing is NOT enough on its own
+        to prevent nonce collisions: multiple markets can fire concurrently
+        (each with its own _market_loop task), and if two calls both fetch
+        get_transaction_count("pending") before either transaction has
+        propagated back into the node's mempool view, they can both receive
+        the SAME nonce — the second one to actually land then gets rejected
+        ("An existing transaction had higher priority", confirmed live in
+        production). `_nonce_lock` serializes the fetch-build-sign-send
+        sequence across all concurrent callers for this signer, so nonce
+        assignment is always strictly sequential regardless of how many
+        markets fire at once. The lock is released before `_poll_for_status`
+        — waiting for a receipt doesn't need mutual exclusion, only
+        submission with an already-assigned nonce does, and holding the lock
+        through that wait would needlessly serialize confirmation-waiting
+        across unrelated bets too."""
         signer = self._key_custody.address
 
-        nonce = await self._rpc.call(self.w3.eth.get_transaction_count, signer, "pending")
-        gas_price = await self._rpc.call(lambda: self.w3.eth.gas_price)
-        tx = await contract_function.build_transaction(
-            {
-                "from": signer,
-                "nonce": nonce,
-                "gas": gas_limit,
-                "gasPrice": gas_price,
-                "chainId": self._chain_id,
-            }
-        )
-        signed = self._key_custody.sign_transaction(tx)
-        tx_hash_bytes = await self._rpc.call(self.w3.eth.send_raw_transaction, signed.raw_transaction)
-        tx_hash = tx_hash_bytes.hex()
+        async with self._nonce_lock:
+            nonce = await self._rpc.call(self.w3.eth.get_transaction_count, signer, "pending")
+            gas_price = await self._rpc.call(lambda: self.w3.eth.gas_price)
+            tx = await contract_function.build_transaction(
+                {
+                    "from": signer,
+                    "nonce": nonce,
+                    "gas": gas_limit,
+                    "gasPrice": gas_price,
+                    "chainId": self._chain_id,
+                }
+            )
+            signed = self._key_custody.sign_transaction(tx)
+            tx_hash_bytes = await self._rpc.call(self.w3.eth.send_raw_transaction, signed.raw_transaction)
 
+        tx_hash = tx_hash_bytes.hex()
         status = await self._poll_for_status(tx_hash_bytes)
         return tx_hash, status
 
