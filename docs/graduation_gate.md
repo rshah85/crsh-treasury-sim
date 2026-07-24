@@ -16,6 +16,17 @@ contract `0x0A2fbF2Dbe08880D8D0d7f2F34B4CC3761f729b1` on Monad) and
 it. This resolves one previously-blocking Assignment question and surfaces one
 new required testnet-verification step:
 
+- **RESOLVED — gas sponsorship mechanism: neither relayer nor paymaster — gas is
+  NOT sponsored.** The original design doc's Open Questions treated "relayer vs.
+  paymaster" as a blocking unknown. Confirmed empirically during first live
+  deployment: `Web3ChainAdapter`'s signer submits ordinary self-funded
+  transactions (`gasPrice` from `w3.eth.gas_price`, signer pays from its own
+  balance) and this is correct as-is — the actual gap was simply that the
+  signer wallet held no native MON to pay gas with. No code changes needed;
+  the wallet needs a MON balance funded directly, same as any normal EOA
+  paying its own gas. Keep this funded going forward — an empty-gas-balance
+  failure looks identical to a real revert in the daemon's logs/circuit
+  breaker, so don't mistake a future recurrence of this for a contract issue.
 - **RESOLVED — USDC bet-placement flow:** the contract pulls funds via a
   standard ERC20 allowance (`bet()`), not `betWithPermit`'s signature flow. The
   adapter approves once at startup (bounded to `lifetime_cap_usdc`, not

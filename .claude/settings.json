@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__Claude_Preview__preview_screenshot",
+      "Bash(railway status*)",
+      "Bash(railway logs*)",
+      "Bash(railway service list*)",
+      "mcp__Claude_Preview__preview_console_logs",
+      "mcp__Claude_Preview__preview_logs",
+      "Bash(railway whoami)",
+      "Bash(railway variable list*)",
+      "Bash(railway ssh keys list*)",
+      "Bash(crontab -l)",
+      "mcp__Claude_Preview__preview_snapshot"
+    ]
+  }
+}

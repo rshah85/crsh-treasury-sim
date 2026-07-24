@@ -412,6 +412,7 @@ async def _build_chain_adapter(config: AgentConfig):
         approve_gas_limit=config.approve_gas_limit,
         tx_confirmation_timeout_s=config.tx_confirmation_timeout_s,
         tx_poll_interval_s=config.tx_poll_interval_s,
+        discovery_window=config.discovery_window,
     )
     await adapter.connect()  # one-time YES/NO/decimals/allowance setup — never in the hot path
     return adapter, key_custody

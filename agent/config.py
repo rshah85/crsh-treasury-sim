@@ -76,6 +76,12 @@ class AgentConfig:
     bet_gas_limit: int = 200_000
     approve_gas_limit: int = 100_000
 
+    # Market discovery re-checks only the last discovery_window market ids
+    # relative to nextMarketId() every cycle (round-based platform — markets
+    # rotate every few minutes, per CRSH). See web3_chain_adapter.py's module
+    # docstring.
+    discovery_window: int = 5
+
     # How long place_bet waits for a receipt before returning TX_UNCONFIRMED
     # rather than hanging. Must stay well inside fire_window_low_s (the T-4s
     # floor) — see docs/queuing_latency_model.md.
@@ -115,6 +121,7 @@ class AgentConfig:
             cfg.approve_target_usdc = float(os.environ["CRSH_APPROVE_TARGET_USDC"])
         cfg.bet_gas_limit = int(os.environ.get("CRSH_BET_GAS_LIMIT", cfg.bet_gas_limit))
         cfg.approve_gas_limit = int(os.environ.get("CRSH_APPROVE_GAS_LIMIT", cfg.approve_gas_limit))
+        cfg.discovery_window = int(os.environ.get("CRSH_DISCOVERY_WINDOW", cfg.discovery_window))
         cfg.tx_confirmation_timeout_s = float(
             os.environ.get("CRSH_TX_CONFIRMATION_TIMEOUT_S", cfg.tx_confirmation_timeout_s)
         )

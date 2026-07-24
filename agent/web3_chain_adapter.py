@@ -34,22 +34,40 @@ Design decisions worth calling out:
   send_raw_transaction, then receipt polling) rather than adding a data-dependent
   one. The fixed limit is a placeholder needing real calibration on testnet — see
   docs/graduation_gate.md.
-- **Status enum ordinals are NOT confirmed against contract source.** The ABI's
-  `getMarket`/`markets` outputs type `status` as
-  `enum UsdcPoolPredictionMarket.Status` but the ABI format doesn't carry the
-  enum's integer mapping. STATUS_OPEN=0 etc. below follow Solidity's
-  first-member-is-0 convention and the error names (`BettingOpen`,
-  `BettingClosed`, `NotOpen`, `StillOpen`, i.e. an Open/Closed/Resolved/Cancelled
-  progression), but this is an assumption, not a verified fact — flagged as a
-  required testnet verification step in docs/graduation_gate.md before mainnet.
-- **Market discovery has no batch/paginated "list active markets" call in this
-  ABI.** `discover_markets` walks `0..nextMarketId()-1` and calls `getMarket` for
-  each id not already known to be terminal (Closed/Resolved/Cancelled never
-  reverts to Open, so terminal ids are cached and never re-fetched). This is
-  O(n) in total markets ever created on a cold start, which will need a better
-  index (e.g. backfilling from `MarketCreated`/`MarketBettingClosed` events)
-  once market volume grows — tracked as a follow-up, not a v1 blocker, since
-  volume is low enough today that a full rescan is cheap.
+- **Status enum ordinals: confirmed authoritatively by CRSH (Lucas) as
+  `Open=0, Resolved=1, Cancelled=2` — there is no Closed state.** Matches what
+  empirical sampling had already found (a 60-market random sample plus
+  targeted lookups showed status=1 correlating with real, non-default
+  `winningOption` + real stakes, i.e. Resolved). The only status value ever
+  observed as anything but Resolved/Cancelled was Open — for markets whose
+  lockTime had already passed, see the discover_markets() note below for why
+  that's expected and handled, not a 4th state.
+- **Market discovery: a small sliding window at the tip, re-checked every
+  cycle — not a full rescan, and not a one-shot cursor either.** Confirmed by
+  CRSH (Lucas): market ids are sequential and the newest is always
+  `nextMarketId() - 1`, and this platform is round-based — markets open and
+  close every few minutes tied to live gaming streams. A full
+  `0..nextMarketId()-1` sweep (5+ minutes per pass at ~11 real calls/sec
+  against this RPC's actual latency) is far too slow to catch short-lived
+  rounds. An earlier fix tried a monotonic "classify each id exactly once,
+  ever" cursor, but that has its own gap: a round short enough to open AND
+  close within the time it takes discover_markets to reach it would get
+  classified as already-expired on its one and only look, and never
+  reconsidered. `discover_markets` now instead re-examines a small fixed
+  window — the last `discovery_window` ids (default 5), i.e.
+  `nextMarketId()-discovery_window .. nextMarketId()-1` — on EVERY call. Ids
+  confirmed Resolved/Cancelled/past-lockTime while still inside the window are
+  cached in `_known_terminal` so they aren't re-fetched every cycle for as
+  long as they remain in-window; ids that age out of the window (superseded
+  by newer ones) are simply never looked at again either way. This bounds
+  cost to a small, constant number of calls per cycle regardless of total
+  market history, and — unlike the one-shot cursor — keeps re-checking each
+  in-window id every cycle until it's confirmed terminal, so a market isn't
+  written off from a single unlucky-timing snapshot. The accepted tradeoff,
+  per Lucas's guidance: a market that was already open and outside the window
+  at daemon startup (or that somehow falls behind the window without ever
+  being confirmed terminal) won't be picked up — bounded to whatever the
+  window doesn't cover, not an unbounded bug.
 - **`get_market_outcome` only reports Resolved markets.** A Cancelled market
   means funds are refundable via `claim()`, not a win/loss — there's no "someone
   won" outcome to report, and this adapter doesn't implement the claim flow
@@ -74,12 +92,13 @@ from .erc20_abi import ERC20_ABI
 from .key_custody import KeyCustody
 from .rpc_client import RateLimitedRpcClient
 
-# See the "Status enum ordinals" note above — inferred, not verified.
+# Confirmed by CRSH (Lucas) — see the "Status enum ordinals" note above.
 STATUS_OPEN = 0
-STATUS_CLOSED = 1
-STATUS_RESOLVED = 2
-STATUS_CANCELLED = 3
+STATUS_RESOLVED = 1
+STATUS_CANCELLED = 2
 _TERMINAL_STATUSES = {STATUS_RESOLVED, STATUS_CANCELLED}
+
+DEFAULT_DISCOVERY_WINDOW = 5
 
 
 class Web3ChainAdapterError(Exception):
@@ -99,6 +118,7 @@ class Web3ChainAdapter:
         approve_gas_limit: int = 100_000,
         tx_confirmation_timeout_s: float = 3.0,
         tx_poll_interval_s: float = 0.25,
+        discovery_window: int = DEFAULT_DISCOVERY_WINDOW,
     ):
         if not rpc_url:
             raise Web3ChainAdapterError("rpc_url is required for Web3ChainAdapter")
@@ -110,6 +130,7 @@ class Web3ChainAdapter:
         self._approve_gas_limit = approve_gas_limit
         self._tx_confirmation_timeout_s = tx_confirmation_timeout_s
         self._tx_poll_interval_s = tx_poll_interval_s
+        self._discovery_window = discovery_window
 
         self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
 
@@ -127,6 +148,11 @@ class Web3ChainAdapter:
         self._usdc_decimals: Optional[int] = None
         self._usdc_contract = None
         self._chain_id: Optional[int] = None
+        # Ids confirmed Resolved/Cancelled/past-lockTime while still inside the
+        # sliding discovery window — see the module docstring's "Market
+        # discovery" note. Never needs seeding at startup: every
+        # discover_markets() call computes its own window fresh from the
+        # current nextMarketId(), so there's no cold-start scan to seed past.
         self._known_terminal: Set[int] = set()
 
     async def connect(self) -> None:
@@ -227,19 +253,27 @@ class Web3ChainAdapter:
     # ── ChainAdapter interface ───────────────────────────────────────────────
 
     async def discover_markets(self) -> list:
+        """Re-examines only the last `discovery_window` market ids relative to
+        the CURRENT nextMarketId() tip, every single call — see the module
+        docstring's "Market discovery" note. Ids confirmed terminal
+        (Resolved/Cancelled/past-lockTime) while still in-window are cached in
+        `_known_terminal` and skipped on later calls; ids that age out of the
+        window without ever being confirmed terminal are simply never visited
+        again either way, since the window only ever looks forward from
+        `nextMarketId() - discovery_window`."""
         next_id = await self._rpc.call(self.contract.functions.nextMarketId().call)
+        now = time.time()
+        window_start = max(0, next_id - self._discovery_window)
         active: list = []
-        for market_id in range(next_id):
+        for market_id in range(window_start, next_id):
             if market_id in self._known_terminal:
                 continue
             market = await self._get_market(market_id)
-            status = market[0]
-            if status == STATUS_OPEN:
+            status, lock_time = market[0], market[3]
+            if status == STATUS_OPEN and lock_time > now:
                 active.append(str(market_id))
-            elif status in _TERMINAL_STATUSES:
+            else:
                 self._known_terminal.add(market_id)
-            # STATUS_CLOSED (betting closed, not yet resolved) is intentionally
-            # left un-cached and un-returned: it's neither active nor terminal.
         return active
 
     async def get_pool_sizes(self, market_id: MarketId) -> Tuple[float, float]:
