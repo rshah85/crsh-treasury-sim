@@ -30,7 +30,7 @@ from ._sim_engine import SimConfigV2, _kelly_bet_size
 
 MIN_IMBALANCE = 0.70
 MAX_IMBALANCE = 0.80  # exclusive — majority_share >= this is skipped, not bet
-MIN_POOL_USDC = 200.0
+MIN_POOL_USDC = 50.0  # lowered from 200 — historical median pool is $84.50
 
 # Empirical favorite win rate in the 70-79% imbalance bucket, from backtesting
 # 3,432 resolved on-chain markets (n=62 qualifying bets in that bucket). Used
