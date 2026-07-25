@@ -42,7 +42,7 @@ MOMENTUM_WIN_PROB = 0.871
 # determines relative sizing below this cap; it just can't push a bet above it.
 # In place while validating the new momentum strategy on a $310 bankroll, to
 # bound the damage of any one bad bet.
-MAX_BET_USDC = 20.0
+MAX_BET_USDC = 25.0
 
 
 @dataclass(frozen=True)
