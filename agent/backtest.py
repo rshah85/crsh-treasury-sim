@@ -32,7 +32,7 @@ all markets generated for the same day share one `now`, exactly like sim_v2 call
 `_get_phase`/computing `effective_edge` once per day before that day's market loop.
 
 No firing-window simulation: the live agent fires immediately once imbalance
-crosses the phase threshold (Option C — see agent/daemon.py's module docstring).
+enters the momentum band (Option C — see agent/daemon.py's module docstring).
 There's no advance signal of when a market will close on this contract (lockTime
 is 0 until an operator manually calls closeBetting()), so there's no countdown
 window to replay here either — a backtest market either clears the imbalance/phase
@@ -74,8 +74,9 @@ class BacktestResult:
     bets_won: int = 0
     bets_lost: int = 0
     bets_reverted: int = 0
-    skipped_no_imbalance: int = 0
-    skipped_below_phase_threshold: int = 0
+    skipped_below_min_imbalance: int = 0
+    skipped_above_max_imbalance: int = 0
+    skipped_pool_too_small: int = 0
     skipped_risk_guard: Dict[str, int] = field(default_factory=dict)
     final_nav: float = 0.0
     realized_pnl: float = 0.0
@@ -140,14 +141,16 @@ async def _run(config: AgentConfig, revert_prob: float, performance_log_path: st
             decision = decide(market_id, yes_pool, no_pool, cfg, clock, now=now)
 
             if decision.action == "skip":
-                if decision.reason == "no imbalance":
-                    result.skipped_no_imbalance += 1
-                else:
-                    result.skipped_below_phase_threshold += 1
+                if decision.reason == "below min imbalance":
+                    result.skipped_below_min_imbalance += 1
+                elif decision.reason == "above max imbalance":
+                    result.skipped_above_max_imbalance += 1
+                elif decision.reason == "pool below minimum":
+                    result.skipped_pool_too_small += 1
                 continue
 
             # No firing-window check — fire immediately once imbalance clears
-            # the phase threshold, matching the live agent's Option C behavior.
+            # the momentum band, matching the live agent's Option C behavior.
             reservation = await risk_guard.check_and_reserve(market_id, decision.side, decision.amount_usdc)
             if not reservation.approved:
                 result.record_skip_reason(reservation.reason)
@@ -207,8 +210,9 @@ def _print_report(result: BacktestResult, config: AgentConfig, performance_log_p
     skips = Table(title="Skip / Non-Fire Breakdown", show_header=False)
     skips.add_column("reason", style="bold")
     skips.add_column("count")
-    skips.add_row("No imbalance past IMBALANCE_THRESHOLD", str(result.skipped_no_imbalance))
-    skips.add_row("Below phase threshold", str(result.skipped_below_phase_threshold))
+    skips.add_row("Below MIN_IMBALANCE", str(result.skipped_below_min_imbalance))
+    skips.add_row("At/above MAX_IMBALANCE", str(result.skipped_above_max_imbalance))
+    skips.add_row("Pool below MIN_POOL_USDC", str(result.skipped_pool_too_small))
     for reason, count in result.skipped_risk_guard.items():
         skips.add_row(f"RiskGuard: {reason}", str(count))
 
