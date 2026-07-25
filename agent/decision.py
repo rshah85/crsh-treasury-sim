@@ -38,6 +38,12 @@ MIN_POOL_USDC = 200.0
 # effective_edge, since this is a measured base rate for the exact band we fire in.
 MOMENTUM_WIN_PROB = 0.871
 
+# Hard ceiling on any single bet, applied after Kelly sizing. Kelly still
+# determines relative sizing below this cap; it just can't push a bet above it.
+# In place while validating the new momentum strategy on a $310 bankroll, to
+# bound the damage of any one bad bet.
+MAX_BET_USDC = 20.0
+
 
 @dataclass(frozen=True)
 class Decision:
@@ -119,6 +125,7 @@ def decide(
         max_kelly_fraction=cfg.max_kelly_fraction,
         rake_pct=cfg.rake_pct,
     )
+    amount = min(amount, MAX_BET_USDC)
 
     if amount <= 0:
         return Decision(
